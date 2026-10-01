@@ -1,0 +1,19 @@
+{
+  "target_min_price": 240.0,
+  "target_max_price": 255.0,
+  "min_amount_dzd": 10000.0,
+  "max_amount_dzd": 13000.0,
+  "token_id": "USDT",
+  "currency_id": "DZD",
+  "check_interval_seconds": 30,
+  "notification_cooldown_minutes": 15,
+  "email": {
+    "enabled": true,
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "use_tls": true,
+    "sender_email": "hocineshow9@gmail.com",
+    "sender_password": "begu cozw lhii puyx",
+    "receiver_email": "hocineshow9@gmail.com"
+  }
+}

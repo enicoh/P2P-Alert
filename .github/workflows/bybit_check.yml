@@ -1,0 +1,24 @@
+name: Bybit P2P Price Monitor
+
+on:
+  schedule:
+    # S'exécute automatiquement toutes les 5 à 10 minutes
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # Permet aussi de lancer manuellement depuis l'interface GitHub
+
+jobs:
+  check-bybit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Configurer Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Vérifier les prix Bybit P2P
+        run: |
+          python bybit_p2p_notifier.py --once
