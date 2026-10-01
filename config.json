@@ -7,6 +7,15 @@
   "currency_id": "DZD",
   "check_interval_seconds": 30,
   "notification_cooldown_minutes": 15,
+  "telegram": {
+    "enabled": true,
+    "bot_token": "",
+    "chat_id": ""
+  },
+  "discord": {
+    "enabled": false,
+    "webhook_url": ""
+  },
   "email": {
     "enabled": true,
     "smtp_server": "smtp.gmail.com",

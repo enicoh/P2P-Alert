@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Bybit P2P Price Alert Notifier
-Monitors Bybit P2P offers and sends an email notification when a seller
-offers the desired price and matches your target purchase budget range.
+Monitors Bybit P2P offers and sends Telegram, Discord, or Email notifications
+when a seller offers the desired price and matches your target purchase budget range.
 """
 
 import sys
@@ -17,6 +17,7 @@ import urllib.error
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
+import os
 
 # Fix Windows and Cloud console UTF-8 and unbuffered output
 try:
@@ -30,8 +31,6 @@ try:
         sys.stderr.reconfigure(line_buffering=True)
 except Exception:
     pass
-
-import os
 
 CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
 BYBIT_P2P_URL = "https://api2.bybit.com/fiat/otc/item/online"
@@ -63,13 +62,30 @@ def load_config():
     if os.environ.get("NOTIFICATION_COOLDOWN_MINUTES"):
         cfg["notification_cooldown_minutes"] = int(os.environ["NOTIFICATION_COOLDOWN_MINUTES"])
 
+    # Telegram configuration
+    tg_cfg = cfg.setdefault("telegram", {})
+    if os.environ.get("TELEGRAM_BOT_TOKEN"):
+        tg_cfg["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"].strip()
+    if os.environ.get("TELEGRAM_CHAT_ID"):
+        tg_cfg["chat_id"] = os.environ["TELEGRAM_CHAT_ID"].strip()
+    if os.environ.get("TELEGRAM_ENABLED") is not None:
+        tg_cfg["enabled"] = os.environ["TELEGRAM_ENABLED"].lower() in ("1", "true", "yes")
+
+    # Discord configuration
+    dc_cfg = cfg.setdefault("discord", {})
+    if os.environ.get("DISCORD_WEBHOOK_URL"):
+        dc_cfg["webhook_url"] = os.environ["DISCORD_WEBHOOK_URL"].strip()
+    if os.environ.get("DISCORD_ENABLED") is not None:
+        dc_cfg["enabled"] = os.environ["DISCORD_ENABLED"].lower() in ("1", "true", "yes")
+
+    # Email configuration
     email_cfg = cfg.setdefault("email", {})
     if os.environ.get("SENDER_EMAIL"):
-        email_cfg["sender_email"] = os.environ["SENDER_EMAIL"]
+        email_cfg["sender_email"] = os.environ["SENDER_EMAIL"].strip()
     if os.environ.get("SENDER_PASSWORD"):
-        email_cfg["sender_password"] = os.environ["SENDER_PASSWORD"]
+        email_cfg["sender_password"] = os.environ["SENDER_PASSWORD"].strip()
     if os.environ.get("RECEIVER_EMAIL"):
-        email_cfg["receiver_email"] = os.environ["RECEIVER_EMAIL"]
+        email_cfg["receiver_email"] = os.environ["RECEIVER_EMAIL"].strip()
 
     return cfg
 
@@ -107,8 +123,6 @@ def get_p2p_items(token_id="USDT", currency_id="DZD", page=1, size=50):
     """
     Fetch P2P ads from Bybit.
     side = '1' corresponds to Sell ads (sellers offering crypto for fiat).
-    We fetch without restrictive amount filter to ensure sellers whose min/max limits
-    overlap with the user's budget range are captured.
     """
     payload = {
         "tokenId": token_id,
@@ -147,12 +161,124 @@ def get_p2p_items(token_id="USDT", currency_id="DZD", page=1, size=50):
         return []
 
 
+def send_telegram(text, config):
+    """Send an alert message via Telegram Bot API using standard HTTPS POST."""
+    tg_cfg = config.get("telegram", {})
+    if not tg_cfg.get("enabled", True):
+        return False, "Telegram désactivé dans la configuration"
+
+    bot_token = tg_cfg.get("bot_token", "").strip()
+    chat_id = tg_cfg.get("chat_id", "").strip()
+
+    if not bot_token or not chat_id:
+        return False, "Token de bot ou Chat ID Telegram non renseigné"
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "BybitNotifier/2.0"},
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            res_body = resp.read().decode("utf-8")
+            res_json = json.loads(res_body)
+            if res_json.get("ok"):
+                print("[SUCCÈS] 📱 Notification Telegram envoyée avec succès !")
+                return True, "Envoyé avec succès sur Telegram"
+            else:
+                err = res_json.get("description", "Erreur Telegram inconnue")
+                print(f"[ERREUR TELEGRAM] {err}")
+                return False, f"Erreur API Telegram: {err}"
+    except Exception as e:
+        print(f"[ERREUR TELEGRAM] Échec de l'envoi: {e}")
+        return False, f"Échec de l'envoi Telegram: {e}"
+
+
+def build_telegram_message(matched_items, min_price, max_price, min_budget, max_budget, token_id, currency_id):
+    """Build a clean, high-priority HTML formatted message for Telegram."""
+    if min_budget == max_budget:
+        budget_str = f"{min_budget:,.0f} {currency_id}".replace(",", " ")
+    else:
+        budget_str = f"{min_budget:,.0f} à {max_budget:,.0f} {currency_id}".replace(",", " ")
+
+    price_range_str = f"{min_price:.2f} - {max_price:.2f} {currency_id}" if min_price else f"<= {max_price:.2f} {currency_id}"
+
+    lines = [
+        "🚨 <b>ALERTE BYBIT P2P DÉTECTÉE !</b>",
+        f"🎯 <b>Cible :</b> <code>{price_range_str}</code>",
+        f"💼 <b>Budget :</b> <code>{budget_str}</code>",
+        "────────────────────"
+    ]
+
+    for item in matched_items[:4]:
+        nick = item.get("nickName", "Inconnu")
+        price = float(item.get("price", 0))
+        min_amt = item.get("minAmount", "0")
+        max_amt = item.get("maxAmount", "0")
+        orders = item.get("recentOrderNum", 0)
+        rate = item.get("recentExecuteRate", 0)
+
+        if min_budget == max_budget:
+            crypto_est = f"~{min_budget / price:.2f} {token_id}"
+        else:
+            crypto_est = f"~{min_budget / price:.2f} à ~{max_budget / price:.2f} {token_id}"
+
+        lines.append(
+            f"👤 <b>{nick}</b>\n"
+            f"💵 Prix : <b>{price:.2f} {currency_id}</b> / {token_id}\n"
+            f"🪙 Obtenu : <b>{crypto_est}</b>\n"
+            f"📊 Limites : {min_amt} à {max_amt} {currency_id}\n"
+            f"⭐ Ordres : {orders} ({rate}%)\n"
+        )
+
+    lines.append('🔗 <a href="https://www.bybit.com/fiat/otc/">👉 <b>Ouvrir Bybit P2P pour acheter</b></a>')
+    return "\n".join(lines)
+
+
+def send_discord(content, config):
+    """Send a notification message via Discord Webhook."""
+    dc_cfg = config.get("discord", {})
+    if not dc_cfg.get("enabled", False):
+        return False, "Discord désactivé dans la configuration"
+
+    webhook_url = dc_cfg.get("webhook_url", "").strip()
+    if not webhook_url:
+        return False, "URL Webhook Discord manquante"
+
+    payload = {"content": content}
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        webhook_url,
+        data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "BybitNotifier/2.0"},
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print("[SUCCÈS] 💬 Notification Discord envoyée avec succès !")
+            return True, "Envoyé avec succès sur Discord"
+    except Exception as e:
+        print(f"[ERREUR DISCORD] {e}")
+        return False, f"Échec de l'envoi Discord: {e}"
+
+
 def send_email(subject, html_body, text_body, config):
     """Send an email using SMTP credentials configured in config.json."""
     email_cfg = config.get("email", {})
     if not email_cfg.get("enabled", True):
         print("[INFO] Envoi d'email désactivé dans la configuration.")
-        return False
+        return False, "Email désactivé dans la configuration"
 
     sender = email_cfg.get("sender_email")
     password = email_cfg.get("sender_password")
@@ -163,7 +289,7 @@ def send_email(subject, html_body, text_body, config):
 
     if not sender or not password or not receiver or "votre_email" in sender:
         print("[ATTENTION] Veuillez renseigner 'sender_email', 'sender_password' et 'receiver_email' dans config.json !")
-        return False
+        return False, "Identifiants email incomplets dans config.json"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -186,11 +312,14 @@ def send_email(subject, html_body, text_body, config):
                     server.starttls()
                 server.login(sender, password)
                 server.sendmail(sender, [receiver], msg.as_string())
-        print(f"[SUCCÈS] Email envoyé à {receiver} !")
-        return True
+        print(f"[SUCCÈS] 📧 Email envoyé à {receiver} !")
+        return True, f"Email envoyé à {receiver}"
     except Exception as e:
-        print(f"[ERREUR EMAIL] Échec de l'envoi de l'email: {e}")
-        return False
+        err_msg = str(e)
+        if "timed out" in err_msg.lower() or "110" in err_msg or "refused" in err_msg.lower():
+            err_msg += " (Port SMTP bloqué par l'hébergeur cloud, ex: Render Free)"
+        print(f"[ERREUR EMAIL] Échec de l'envoi de l'email: {err_msg}")
+        return False, err_msg
 
 
 def build_alert_message(matched_items, min_price, max_price, min_budget, max_budget, token_id, currency_id):
@@ -306,9 +435,38 @@ Bon achat !
     return subject, html_body, text_body
 
 
+def test_telegram(config):
+    """Send a test message via Telegram."""
+    print("[TEST TELEGRAM] Envoi d'un message test...")
+    text = (
+        "🤖 <b>Test de Notification Bybit P2P</b>\n\n"
+        "✅ Votre bot Telegram est parfaitement connecté et configuré !\n"
+        f"⏰ Horodatage : <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n\n"
+        "Vous recevrez une alerte instantanée dès qu'une offre compatible est trouvée."
+    )
+    ok, msg = send_telegram(text, config)
+    if ok:
+        print("[TEST TELEGRAM] ✅ Succès ! Message reçu sur votre Telegram.")
+    else:
+        print(f"[TEST TELEGRAM] ❌ Échec : {msg}")
+    return ok
+
+
+def test_discord(config):
+    """Send a test message via Discord webhook."""
+    print("[TEST DISCORD] Envoi d'un message test...")
+    content = f"🧪 **Test Réussi !** Le webhook Discord du notificateur Bybit P2P fonctionne correctement. ({datetime.now().strftime('%H:%M:%S')})"
+    ok, msg = send_discord(content, config)
+    if ok:
+        print("[TEST DISCORD] ✅ Succès ! Message envoyé sur Discord.")
+    else:
+        print(f"[TEST DISCORD] ❌ Échec : {msg}")
+    return ok
+
+
 def test_email(config):
     """Send a test email to verify credentials."""
-    print("[TEST] Envoi d'un email de test...")
+    print("[TEST EMAIL] Envoi d'un email de test...")
     sub = "🧪 Test de notification - Bybit P2P Alert"
     text = "Ceci est un email de test pour confirmer que vos paramètres SMTP fonctionnent correctement."
     html = f"""
@@ -320,17 +478,17 @@ def test_email(config):
     </body>
     </html>
     """
-    success = send_email(sub, html, text, config)
-    if success:
-        print("[TEST] ✅ Email de test envoyé avec succès ! Vos identifiants sont valides.")
+    ok, msg = send_email(sub, html, text, config)
+    if ok:
+        print("[TEST EMAIL] ✅ Email de test envoyé avec succès ! Vos identifiants sont valides.")
     else:
-        print("[TEST] ❌ Échec de l'envoi. Veuillez vérifier vos identifiants dans config.json.")
-    return success
+        print(f"[TEST EMAIL] ❌ Échec de l'envoi : {msg}")
+    return ok
 
 
 def run_check(config, alerted_ads):
     """
-    Run a single check of Bybit P2P prices and send alert if condition met.
+    Run a single check of Bybit P2P prices and dispatch notifications across configured channels.
     """
     min_price_cfg = config.get("target_min_price")
     min_price = float(min_price_cfg) if min_price_cfg is not None and float(min_price_cfg) > 0 else None
@@ -349,7 +507,7 @@ def run_check(config, alerted_ads):
 
     if not items:
         print(f"[{now_str}] Aucune offre disponible pour le moment sur Bybit ({token_id}/{currency_id}).")
-        return
+        return None
 
     # Extract valid price items and sort ascending
     valid_items = []
@@ -364,7 +522,7 @@ def run_check(config, alerted_ads):
 
     if not valid_items:
         print(f"[{now_str}] Données d'offres invalides reçues.")
-        return
+        return None
 
     if min_budget == max_budget:
         budget_label = f"{min_budget:.0f} {currency_id}"
@@ -373,10 +531,7 @@ def run_check(config, alerted_ads):
 
     target_range_str = f"[{min_price:.2f} - {max_price:.2f} {currency_id}]" if min_price else f"<= {max_price:.2f} {currency_id}"
 
-    # Find the best price that accepts the user's budget range:
-    # A trade is possible if:
-    # 1) seller.minAmount <= user.max_budget (seller doesn't require more than we want to spend)
-    # 2) seller.maxAmount >= user.min_budget (seller has at least our minimum budget)
+    # Find the best price that accepts the user's budget range
     best_matching_offer = None
     for p, it in valid_items:
         min_a = float(it.get("minAmount", 0))
@@ -414,10 +569,36 @@ def run_check(config, alerted_ads):
                     matched.append(item)
                     alerted_ads[ad_id] = now_ts
 
+    notifications_sent = []
+
     if matched:
         print(f"[{now_str}] 🎉 {len(matched)} offre(s) trouvée(s) dans la fourchette {target_range_str} acceptant ({budget_label}) !")
-        sub, html, text = build_alert_message(matched, min_price, max_price, min_budget, max_budget, token_id, currency_id)
-        send_email(sub, html, text, config)
+
+        # 1. Telegram Alert
+        tg_cfg = config.get("telegram", {})
+        if tg_cfg.get("enabled", True) and tg_cfg.get("bot_token") and tg_cfg.get("chat_id"):
+            tg_text = build_telegram_message(matched, min_price, max_price, min_budget, max_budget, token_id, currency_id)
+            ok, msg = send_telegram(tg_text, config)
+            notifications_sent.append({"channel": "Telegram", "success": ok, "detail": msg, "time": now_str})
+        elif tg_cfg.get("enabled", True) and not tg_cfg.get("bot_token"):
+            print(f"[{now_str}] [INFO] Telegram activé mais token non configuré.")
+
+        # 2. Discord Alert
+        dc_cfg = config.get("discord", {})
+        if dc_cfg.get("enabled", False) and dc_cfg.get("webhook_url"):
+            dc_text = f"🚀 **Alerte Bybit P2P** : {len(matched)} offre(s) compatible(s) trouvée(s) ! Meilleur prix: {matched[0].get('price')} {currency_id}. https://www.bybit.com/fiat/otc/"
+            ok, msg = send_discord(dc_text, config)
+            notifications_sent.append({"channel": "Discord", "success": ok, "detail": msg, "time": now_str})
+
+        # 3. Email Alert
+        em_cfg = config.get("email", {})
+        if em_cfg.get("enabled", True) and em_cfg.get("sender_email") and em_cfg.get("sender_password"):
+            sub, html, text = build_alert_message(matched, min_price, max_price, min_budget, max_budget, token_id, currency_id)
+            ok, msg = send_email(sub, html, text, config)
+            notifications_sent.append({"channel": "Email", "success": ok, "detail": msg, "time": now_str})
+
+    tg_active = bool(config.get("telegram", {}).get("enabled", True) and config.get("telegram", {}).get("bot_token") and config.get("telegram", {}).get("chat_id"))
+    email_active = bool(config.get("email", {}).get("enabled", True) and config.get("email", {}).get("sender_email"))
 
     return {
         "time": now_str,
@@ -426,20 +607,31 @@ def run_check(config, alerted_ads):
         "limits": f"{b_min} à {b_max} {currency_id}" if best_matching_offer else None,
         "matched_count": len(matched),
         "target_range": target_range_str,
-        "budget_label": budget_label
+        "budget_label": budget_label,
+        "notifications_sent": notifications_sent,
+        "telegram_active": tg_active,
+        "email_active": email_active
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Moniteur de prix Bybit P2P avec alertes par Email.")
-    parser.add_argument("--test-email", action="store_true", help="Envoyer un email de test pour valider la configuration.")
+    parser = argparse.ArgumentParser(description="Moniteur de prix Bybit P2P avec alertes Telegram & Email.")
+    parser.add_argument("--test-email", action="store_true", help="Envoyer un email de test pour valider la configuration SMTP.")
+    parser.add_argument("--test-telegram", action="store_true", help="Envoyer un message de test sur Telegram.")
+    parser.add_argument("--test-discord", action="store_true", help="Envoyer un message de test sur Discord.")
+    parser.add_argument("--test-all", action="store_true", help="Tester tous les canaux de notifications configurés.")
     parser.add_argument("--once", action="store_true", help="Vérifier le prix une seule fois et quitter.")
     args = parser.parse_args()
 
     config = load_config()
 
-    if args.test_email:
+    if args.test_telegram or args.test_all:
+        test_telegram(config)
+    if args.test_discord or args.test_all:
+        test_discord(config)
+    if args.test_email or args.test_all:
         test_email(config)
+    if args.test_telegram or args.test_discord or args.test_email or args.test_all:
         return
 
     min_p = config.get("target_min_price")
@@ -447,6 +639,9 @@ def main():
     min_budget, max_budget = get_budget_range(config)
     curr = config.get("currency_id", "DZD")
     tok = config.get("token_id", "USDT")
+
+    tg_ready = bool(config.get("telegram", {}).get("bot_token") and config.get("telegram", {}).get("chat_id"))
+    em_ready = bool(config.get("email", {}).get("sender_email") and config.get("email", {}).get("sender_password"))
 
     print("=" * 60)
     print("🚀 DÉMARRAGE DU MONITEUR BYBIT P2P")
@@ -462,7 +657,8 @@ def main():
         print(f"• Prix max d'alerte : <= {max_p:.2f} {curr}")
 
     print(f"• Intervalle de test : {config.get('check_interval_seconds', 30)} secondes")
-    print(f"• Destinataire email : {config.get('email', {}).get('receiver_email', 'Non configuré')}")
+    print(f"• Canal Telegram : {'✅ Configuré (Recommandé Cloud)' if tg_ready else '⚠️ Non configuré (bot_token/chat_id manquants)'}")
+    print(f"• Canal Email : {'✅ Configuré' if em_ready else '⚠️ Non configuré'}")
     print("=" * 60)
 
     alerted_ads = {}
