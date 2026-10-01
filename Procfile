@@ -1,1 +1,1 @@
-web: python app_cloud.py
+web: python -u app_cloud.py

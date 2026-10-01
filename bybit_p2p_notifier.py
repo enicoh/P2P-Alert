@@ -18,11 +18,18 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 
-# Fix Windows console UTF-8 output
-if sys.stdout.encoding != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-if sys.stderr.encoding != 'utf-8':
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+# Fix Windows and Cloud console UTF-8 and unbuffered output
+try:
+    if sys.stdout.encoding != 'utf-8':
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+    else:
+        sys.stdout.reconfigure(line_buffering=True)
+    if sys.stderr.encoding != 'utf-8':
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+    else:
+        sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 import os
 
@@ -411,6 +418,16 @@ def run_check(config, alerted_ads):
         print(f"[{now_str}] 🎉 {len(matched)} offre(s) trouvée(s) dans la fourchette {target_range_str} acceptant ({budget_label}) !")
         sub, html, text = build_alert_message(matched, min_price, max_price, min_budget, max_budget, token_id, currency_id)
         send_email(sub, html, text, config)
+
+    return {
+        "time": now_str,
+        "best_price": bp if best_matching_offer else (first_p if valid_items else None),
+        "seller": bi.get('nickName') if best_matching_offer else (first_item.get('nickName') if valid_items else None),
+        "limits": f"{b_min} à {b_max} {currency_id}" if best_matching_offer else None,
+        "matched_count": len(matched),
+        "target_range": target_range_str,
+        "budget_label": budget_label
+    }
 
 
 def main():
