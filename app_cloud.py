@@ -37,6 +37,8 @@ latest_state = {
     "budget_label": None,
     "telegram_active": False,
     "email_active": False,
+    "eligible_filter_active": True,
+    "ineligible_count": 0,
     "notifications_history": []
 }
 
@@ -56,7 +58,15 @@ class HealthHandler(BaseHTTPRequestHandler):
         budget = latest_state.get("budget_label") or "N/A"
         tg_active = latest_state.get("telegram_active", False)
         email_active = latest_state.get("email_active", False)
+        eligible_active = latest_state.get("eligible_filter_active", True)
+        ineligible_cnt = latest_state.get("ineligible_count", 0)
         history = latest_state.get("notifications_history", [])
+
+        # Eligibility status badge
+        if eligible_active:
+            eligible_badge = '<span class="status-pill status-ok">✅ Actif (&lt; 5 achats/mois)</span>'
+        else:
+            eligible_badge = '<span class="status-pill status-muted">Désactivé</span>'
 
         # Notification status badges
         if tg_active:
@@ -242,6 +252,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             <div class="metric-label">Meilleur prix compatible détecté</div>
             <div class="metric-val">{price_str}</div>
             <div style="color: #94a3b8; font-size: 13px; margin-top: 6px;">Vendeur : <strong style="color:#f8fafc;">{seller}</strong> ({limits})</div>
+            {f'<div style="color: #64748b; font-size: 12px; margin-top: 6px;">🛡️ {ineligible_cnt} vendeur(s) inéligible(s) écarté(s) (exigences &gt; 0 ordre)</div>' if ineligible_cnt > 0 else ''}
         </div>
 
         <div style="margin-top: 8px;">
@@ -252,6 +263,10 @@ class HealthHandler(BaseHTTPRequestHandler):
             <div class="info-row">
                 <span class="info-lbl">Budget recherché :</span>
                 <span class="info-data">{budget}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-lbl">Éligibilité acheteur :</span>
+                <span>{eligible_badge}</span>
             </div>
             <div class="info-row">
                 <span class="info-lbl">Alerte Telegram :</span>

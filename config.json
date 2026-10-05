@@ -1,23 +1,30 @@
 {
   "target_min_price": 240.0,
   "target_max_price": 255.0,
-  "min_amount_dzd": 10000.0,
+  "min_amount_dzd": 8000.0,
   "max_amount_dzd": 13000.0,
   "token_id": "USDT",
   "currency_id": "DZD",
   "check_interval_seconds": 30,
   "notification_cooldown_minutes": 15,
+  "buyer_profile": {
+    "filter_eligible_only": true,
+    "completed_orders_30d": 0,
+    "has_kyc": true,
+    "account_age_days": 90,
+    "nationality": "DZA"
+  },
   "telegram": {
     "enabled": true,
-    "bot_token": "",
-    "chat_id": ""
+    "bot_token": "8806002756:AAF6QFZMKXlMjXxt4e_2VNLRo_jtFlMRk_A",
+    "chat_id": "5850428919"
   },
   "discord": {
     "enabled": false,
     "webhook_url": ""
   },
   "email": {
-    "enabled": true,
+    "enabled": false,
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587,
     "use_tls": true,

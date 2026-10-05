@@ -11,6 +11,7 @@ import json
 import time
 import smtplib
 import argparse
+import ssl
 from datetime import datetime
 import urllib.request
 import urllib.error
@@ -34,6 +35,21 @@ except Exception:
 
 CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
 BYBIT_P2P_URL = "https://api2.bybit.com/fiat/otc/item/online"
+
+
+def make_urlopen(req, timeout=15):
+    """
+    Open URL with automatic fallback to unverified SSL context if local
+    antivirus, VPN, or corporate proxy intercepts HTTPS with a self-signed certificate.
+    """
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.URLError as e:
+        err_str = str(e).lower()
+        if "certificate_verify_failed" in err_str or "certificate verify failed" in err_str:
+            ctx = ssl._create_unverified_context()
+            return urllib.request.urlopen(req, context=ctx, timeout=timeout)
+        raise
 
 
 def load_config():
@@ -87,6 +103,19 @@ def load_config():
     if os.environ.get("RECEIVER_EMAIL"):
         email_cfg["receiver_email"] = os.environ["RECEIVER_EMAIL"].strip()
 
+    # Buyer eligibility configuration
+    buyer_cfg = cfg.setdefault("buyer_profile", {})
+    if os.environ.get("FILTER_ELIGIBLE_ONLY") is not None:
+        buyer_cfg["filter_eligible_only"] = os.environ["FILTER_ELIGIBLE_ONLY"].lower() in ("1", "true", "yes")
+    if os.environ.get("BUYER_COMPLETED_ORDERS_30D") is not None:
+        buyer_cfg["completed_orders_30d"] = int(os.environ["BUYER_COMPLETED_ORDERS_30D"])
+    if os.environ.get("BUYER_HAS_KYC") is not None:
+        buyer_cfg["has_kyc"] = os.environ["BUYER_HAS_KYC"].lower() in ("1", "true", "yes")
+    if os.environ.get("BUYER_ACCOUNT_AGE_DAYS") is not None:
+        buyer_cfg["account_age_days"] = int(os.environ["BUYER_ACCOUNT_AGE_DAYS"])
+    if os.environ.get("BUYER_NATIONALITY"):
+        buyer_cfg["nationality"] = os.environ["BUYER_NATIONALITY"].strip().upper()
+
     return cfg
 
 
@@ -119,6 +148,63 @@ def get_budget_range(config):
     return min_b, max_b
 
 
+def is_buyer_eligible(item, config):
+    """
+    Check if the buyer is eligible according to the merchant's trading preferences (tradingPreferenceSet).
+    Specifically handles infrequent buyers (e.g. < 5 purchases/month) who are blocked by merchants
+    requiring 5, 10, or 60 completed orders in the last 30 days.
+    """
+    profile = config.get("buyer_profile", {})
+    if not profile.get("filter_eligible_only", True):
+        return True, "Filtre désactivé"
+
+    pref = item.get("tradingPreferenceSet") or {}
+
+    # 1. Check required completed orders in last 30 days
+    if pref.get("hasOrderFinishNumberDay30") in (1, "1", True):
+        try:
+            req_orders = int(pref.get("orderFinishNumberDay30") or 0)
+        except (ValueError, TypeError):
+            req_orders = 0
+        user_orders = int(profile.get("completed_orders_30d", 0))
+        if user_orders < req_orders:
+            return False, f"exige >= {req_orders} ordres/30j (profil acheteur: {user_orders})"
+
+    # 2. Check KYC requirement
+    if pref.get("isKyc") in (1, "1", True):
+        if not profile.get("has_kyc", True):
+            return False, "exige KYC vérifié"
+
+    # 3. Check account registration age requirement (days)
+    if pref.get("hasRegisterTime") in (1, "1", True):
+        try:
+            req_days = int(pref.get("registerTimeThreshold") or 0)
+        except (ValueError, TypeError):
+            req_days = 0
+        user_age = int(profile.get("account_age_days", 90))
+        if user_age < req_days:
+            return False, f"compte créé depuis au moins {req_days} jours (profil: {user_age}j)"
+
+    # 4. Check 30-day order completion rate requirement
+    if pref.get("hasCompleteRateDay30") in (1, "1", True):
+        try:
+            req_rate = float(pref.get("completeRateDay30") or 0)
+        except (ValueError, TypeError):
+            req_rate = 0.0
+        user_rate = float(profile.get("completion_rate_30d", 100.0))
+        if user_rate < req_rate:
+            return False, f"taux de réussite >= {req_rate}% (profil: {user_rate}%)"
+
+    # 5. Check nationality limit requirement
+    if pref.get("hasNationalLimit") in (1, "1", True):
+        req_nat = str(pref.get("nationalLimit") or "").strip().upper()
+        user_nat = str(profile.get("nationality", "DZA")).strip().upper()
+        if req_nat and user_nat and req_nat != user_nat:
+            return False, f"nationalité {req_nat} requise (profil: {user_nat})"
+
+    return True, "Éligible"
+
+
 def get_p2p_items(token_id="USDT", currency_id="DZD", page=1, size=50):
     """
     Fetch P2P ads from Bybit.
@@ -146,7 +232,7 @@ def get_p2p_items(token_id="USDT", currency_id="DZD", page=1, size=50):
     req = urllib.request.Request(BYBIT_P2P_URL, data=data, headers=headers, method="POST")
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with make_urlopen(req, timeout=15) as resp:
             body = resp.read().decode("utf-8")
             result = json.loads(body)
             if result.get("ret_code") != 0:
@@ -189,7 +275,7 @@ def send_telegram(text, config):
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with make_urlopen(req, timeout=15) as resp:
             res_body = resp.read().decode("utf-8")
             res_json = json.loads(res_body)
             if res_json.get("ok"):
@@ -217,6 +303,7 @@ def build_telegram_message(matched_items, min_price, max_price, min_budget, max_
         "🚨 <b>ALERTE BYBIT P2P DÉTECTÉE !</b>",
         f"🎯 <b>Cible :</b> <code>{price_range_str}</code>",
         f"💼 <b>Budget :</b> <code>{budget_str}</code>",
+        "🛡️ <b>Éligibilité :</b> <code>Vendeur compatible vérifié</code>",
         "────────────────────"
     ]
 
@@ -265,7 +352,7 @@ def send_discord(content, config):
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with make_urlopen(req, timeout=15) as resp:
             print("[SUCCÈS] 💬 Notification Discord envoyée avec succès !")
             return True, "Envoyé avec succès sur Discord"
     except Exception as e:
@@ -509,20 +596,44 @@ def run_check(config, alerted_ads):
         print(f"[{now_str}] Aucune offre disponible pour le moment sur Bybit ({token_id}/{currency_id}).")
         return None
 
-    # Extract valid price items and sort ascending
+    # Extract valid price items that pass buyer eligibility check
     valid_items = []
+    ineligible_items = []
     for item in items:
         try:
             p = float(item.get("price", 0))
+            is_ok, reason = is_buyer_eligible(item, config)
+            if not is_ok:
+                ineligible_items.append((p, item, reason))
+                continue
             valid_items.append((p, item))
         except (ValueError, TypeError):
             continue
 
     valid_items.sort(key=lambda x: x[0])
 
+    if ineligible_items:
+        excluded_preview = ", ".join([f"{it.get('nickName')} ({rs})" for _, it, rs in ineligible_items[:3]])
+        more_cnt = len(ineligible_items) - 3
+        more_str = f" et +{more_cnt} autre(s)" if more_cnt > 0 else ""
+        print(f"[{now_str}] 🛡️ {len(ineligible_items)} offre(s) écartée(s) (critères d'éligibilité non remplis : {excluded_preview}{more_str})")
+
     if not valid_items:
-        print(f"[{now_str}] Données d'offres invalides reçues.")
-        return None
+        print(f"[{now_str}] Aucune offre éligible disponible actuellement sur Bybit.")
+        return {
+            "time": now_str,
+            "best_price": None,
+            "seller": None,
+            "limits": None,
+            "matched_count": 0,
+            "target_range": target_range_str,
+            "budget_label": budget_label,
+            "notifications_sent": [],
+            "telegram_active": bool(config.get("telegram", {}).get("enabled", True) and config.get("telegram", {}).get("bot_token") and config.get("telegram", {}).get("chat_id")),
+            "email_active": bool(config.get("email", {}).get("enabled", True) and config.get("email", {}).get("sender_email")),
+            "ineligible_count": len(ineligible_items),
+            "eligible_filter_active": bool(config.get("buyer_profile", {}).get("filter_eligible_only", True))
+        }
 
     if min_budget == max_budget:
         budget_label = f"{min_budget:.0f} {currency_id}"
@@ -610,7 +721,9 @@ def run_check(config, alerted_ads):
         "budget_label": budget_label,
         "notifications_sent": notifications_sent,
         "telegram_active": tg_active,
-        "email_active": email_active
+        "email_active": email_active,
+        "ineligible_count": len(ineligible_items),
+        "eligible_filter_active": bool(config.get("buyer_profile", {}).get("filter_eligible_only", True))
     }
 
 
@@ -640,8 +753,12 @@ def main():
     curr = config.get("currency_id", "DZD")
     tok = config.get("token_id", "USDT")
 
-    tg_ready = bool(config.get("telegram", {}).get("bot_token") and config.get("telegram", {}).get("chat_id"))
-    em_ready = bool(config.get("email", {}).get("sender_email") and config.get("email", {}).get("sender_password"))
+    tg_ready = bool(config.get("telegram", {}).get("enabled", True) and config.get("telegram", {}).get("bot_token") and config.get("telegram", {}).get("chat_id"))
+    em_ready = bool(config.get("email", {}).get("enabled", False) and config.get("email", {}).get("sender_email") and config.get("email", {}).get("sender_password"))
+
+    buyer_cfg = config.get("buyer_profile", {})
+    filt_on = buyer_cfg.get("filter_eligible_only", True)
+    ord_lim = buyer_cfg.get("completed_orders_30d", 0)
 
     print("=" * 60)
     print("🚀 DÉMARRAGE DU MONITEUR BYBIT P2P")
@@ -656,9 +773,10 @@ def main():
     else:
         print(f"• Prix max d'alerte : <= {max_p:.2f} {curr}")
 
+    print(f"• Filtre éligibilité vendeur : {'✅ Actif (exclut vendeurs exigeant > ' + str(ord_lim) + ' ordres/30j)' if filt_on else '❌ Désactivé'}")
     print(f"• Intervalle de test : {config.get('check_interval_seconds', 30)} secondes")
     print(f"• Canal Telegram : {'✅ Configuré (Recommandé Cloud)' if tg_ready else '⚠️ Non configuré (bot_token/chat_id manquants)'}")
-    print(f"• Canal Email : {'✅ Configuré' if em_ready else '⚠️ Non configuré'}")
+    print(f"• Canal Email : {'✅ Configuré' if em_ready else '⚪ Désactivé'}")
     print("=" * 60)
 
     alerted_ads = {}
