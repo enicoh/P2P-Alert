@@ -1,6 +1,7 @@
 {
+  "platforms": ["binance", "bybit"],
   "target_min_price": 200.0,
-  "target_max_price": 255.0,
+  "target_max_price": 256.0,
   "min_amount_dzd": 2000.0,
   "max_amount_dzd": 13000.0,
   "token_id": "USDT",

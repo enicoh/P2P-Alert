@@ -1,32 +1,57 @@
-# 🔔 Bybit P2P Price Alert Notifier
+# 🔔 P2P Multi-Exchange Price Alert Notifier (Bybit, Binance, OKX, KuCoin)
 
-Surveillance automatique en temps réel du marché **Bybit P2P** (ex: **USDT / DZD**) avec notifications instantanées par **Telegram** (push mobile avec alerte sonore), **Email** ou **Discord**.
+Surveillance automatique en temps réel des meilleurs marchés **P2P en Algérie** (**Bybit**, **Binance P2P**, **OKX**, **KuCoin** pour **USDT / DZD**) avec comparateur instantané et notifications par **Telegram** (push mobile avec alerte sonore), **Email** ou **Discord**.
 
-Le projet inclut un **serveur web cloud avec tableau de bord en direct** (`app_cloud.py`) prêt à être déployé gratuitement 24h/24 et 7j/7 sur **Render**, sans jamais s'interrompre grâce à un système keep-alive **UptimeRobot**.
+Le projet inclut un **serveur web cloud avec tableau de bord en direct** (`app_cloud.py`) affichant la comparaison des prix entre chaque plateforme, prêt à être déployé gratuitement 24h/24 et 7j/7 sur **Render**, sans jamais s'interrompre grâce à un système keep-alive **UptimeRobot**.
 
 ---
 
 ## 📑 Sommaire
 1. [⚡ Fonctionnalités Clés](#-fonctionnalités-clés)
-2. [📱 1. Configuration des Notifications Telegram](#-1-configuration-des-notifications-telegram-recommandé)
-3. [☁️ 2. Déploiement Cloud 24/7 sur Render](#-2-déploiement-cloud-247-sur-render-gratuit)
-4. [⏱️ 3. Empêcher Render de Dormir (Keep-Alive 24/7 avec UptimeRobot)](#-3-empêcher-render-de-dormir-keep-alive-247-avec-uptimerobot)
-5. [⚙️ 4. Paramètres de Configuration (`config.json`)](#-4-paramètres-de-configuration-configjson)
-6. [📧 5. Configuration Email (Optionnel - Gmail)](#-5-configuration-email-optionnel---gmail)
-7. [💻 6. Utilisation Locale (Windows / Mac / Linux)](#-6-utilisation-locale-windows--mac--linux)
-8. [🛡️ 7. Filtre d'Éligibilité Acheteur](#-7-filtre-déligibilité-acheteur)
-9. [❓ 8. FAQ & Dépannage](#-8-faq--dépannage)
+2. [🌐 Choix des Plateformes (Bybit, Binance, OKX, KuCoin)](#-choix-des-plateformes)
+3. [📱 1. Configuration des Notifications Telegram](#-1-configuration-des-notifications-telegram-recommandé)
+4. [☁️ 2. Déploiement Cloud 24/7 sur Render](#-2-déploiement-cloud-247-sur-render-gratuit)
+5. [⏱️ 3. Empêcher Render de Dormir (Keep-Alive 24/7 avec UptimeRobot)](#-3-empêcher-render-de-dormir-keep-alive-247-avec-uptimerobot)
+6. [⚙️ 4. Paramètres de Configuration (`config.json`)](#-4-paramètres-de-configuration-configjson)
+7. [📧 5. Configuration Email (Optionnel - Gmail)](#-5-configuration-email-optionnel---gmail)
+8. [💻 6. Utilisation Locale (Windows / Mac / Linux)](#-6-utilisation-locale-windows--mac--linux)
+9. [🛡️ 7. Filtre d'Éligibilité Acheteur](#-7-filtre-déligibilité-acheteur)
+10. [❓ 8. FAQ & Dépannage](#-8-faq--dépannage)
 
 ---
 
 ## ⚡ Fonctionnalités Clés
 
-- **Notifications Multi-Canaux** : Alerte instantanée sur smartphone via **Telegram Bot**, webhook **Discord** ou **Email HTML**.
+- **Agrégateur Multi-Plateformes** : Interroge en parallèle **Binance P2P**, **Bybit**, **OKX** et **KuCoin** pour trouver automatiquement la plateforme la moins chère.
+- **Sélection Simple & Flexible** : Choisissez une seule plateforme (`"binance"` ou `"bybit"` ou `"okx"`) ou comparez-les toutes à la fois (`"all"`).
+- **Notifications Multi-Canaux** : Alerte instantanée sur smartphone via **Telegram Bot**, webhook **Discord** ou **Email HTML** avec badge de la plateforme gagnante.
 - **Filtre Intelligent du Budget** : Vérifie que le vendeur accepte bien votre montant d'achat (ex: entre 2 000 DA et 13 000 DA) en analysant ses limites minimales et maximales.
 - **Filtre d'Éligibilité Acheteur** : Écarte automatiquement les marchands qui imposent des conditions bloquantes pour les petits acheteurs (ex: marchands exigeant plus de 5, 10 ou 60 ordres sur 30 jours).
-- **Tableau de Bord Web en Direct (`app_cloud.py`)** : Interface sombre moderne affichant en temps réel le meilleur prix compatible, le vendeur, les limites et l'historique des alertes.
+- **Tableau de Bord Web en Direct (`app_cloud.py`)** : Interface sombre moderne avec comparateur en temps réel des prix Bybit / Binance / OKX / KuCoin et historique des alertes.
 - **Anti-Spam (Cooldown)** : Évite de vous submerger de notifications pour la même offre (intervalle configurable, ex: 15 minutes).
-- **Zéro Dépendance Lourde** : Fonctionne avec la bibliothèque standard Python (`urllib`, `smtplib`, `json`, `http.server`).
+- **Zéro Dépendance Lourde** : Fonctionne avec la bibliothèque standard Python (`urllib`, `smtplib`, `json`, `http.server`, `concurrent.futures`).
+
+---
+
+## 🌐 Choix des Plateformes
+
+Dans votre fichier [`config.json`](config.json), vous pouvez choisir les plateformes à surveiller en toute simplicité :
+
+```json
+// Option 1 : Surveiller toutes les plateformes pour avoir le meilleur prix absolu (Recommandé)
+"platforms": ["bybit", "binance", "okx", "kucoin"]
+
+// Option 2 : Surveiller uniquement Binance P2P
+"platforms": ["binance"]
+
+// Option 3 : Surveiller uniquement Bybit
+"platforms": ["bybit"]
+
+// Option 4 : Surveiller Binance + Bybit
+"platforms": ["binance", "bybit"]
+```
+*(Vous pouvez aussi utiliser le mot-clé `"platform": "all"` ou `"platform": "binance"`).*
+
 
 ---
 
@@ -179,6 +204,7 @@ Le fichier [`config.json`](config.json) permet de définir vos critères d'achat
 
 ```json
 {
+  "platforms": ["bybit", "binance", "okx", "kucoin"],
   "target_min_price": 200.0,
   "target_max_price": 255.0,
   "min_amount_dzd": 2000.0,

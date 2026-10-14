@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bybit P2P Price Alert Notifier
-Monitors Bybit P2P offers and sends Telegram, Discord, or Email notifications
-when a seller offers the desired price and matches your target purchase budget range.
+P2P Multi-Exchange Price Alert Notifier (Algeria - USDT/DZD)
+Monitors P2P offers across Bybit, Binance, OKX, and KuCoin.
+Sends Telegram, Discord, or Email notifications when a seller offers
+the desired price within your target purchase budget range.
 """
 
 import sys
@@ -19,6 +20,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 import os
+import concurrent.futures
 
 # Fix Windows and Cloud console UTF-8 and unbuffered output
 try:
@@ -35,21 +37,26 @@ except Exception:
 
 CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
 BYBIT_P2P_URL = "https://api2.bybit.com/fiat/otc/item/online"
+BINANCE_P2P_URL = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
 
 
-def make_urlopen(req, timeout=15):
+def make_urlopen(req, timeout=12, retries=1):
     """
-    Open URL with automatic fallback to unverified SSL context if local
+    Open URL with automatic retry and fallback to unverified SSL context if local
     antivirus, VPN, or corporate proxy intercepts HTTPS with a self-signed certificate.
     """
-    try:
-        return urllib.request.urlopen(req, timeout=timeout)
-    except urllib.error.URLError as e:
-        err_str = str(e).lower()
-        if "certificate_verify_failed" in err_str or "certificate verify failed" in err_str:
-            ctx = ssl._create_unverified_context()
-            return urllib.request.urlopen(req, context=ctx, timeout=timeout)
-        raise
+    for attempt in range(retries + 1):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.URLError as e:
+            err_str = str(e).lower()
+            if "certificate_verify_failed" in err_str or "certificate verify failed" in err_str:
+                ctx = ssl._create_unverified_context()
+                return urllib.request.urlopen(req, context=ctx, timeout=timeout)
+            if attempt < retries:
+                time.sleep(0.8)
+                continue
+            raise
 
 
 def load_config():
@@ -64,7 +71,15 @@ def load_config():
     else:
         print(f"[INFO] '{CONFIG_FILE}' introuvable, utilisation des variables d'environnement.")
 
-    # Override with environment variables if present
+    # Platforms configuration
+    if os.environ.get("PLATFORMS"):
+        cfg["platforms"] = os.environ["PLATFORMS"].strip()
+    elif os.environ.get("PLATFORM"):
+        cfg["platforms"] = os.environ["PLATFORM"].strip()
+    elif "platforms" not in cfg and "platform" not in cfg:
+        cfg["platforms"] = ["bybit", "binance", "okx", "kucoin"]
+
+    # Target prices and amounts
     if os.environ.get("TARGET_MIN_PRICE"):
         cfg["target_min_price"] = float(os.environ["TARGET_MIN_PRICE"])
     if os.environ.get("TARGET_MAX_PRICE"):
@@ -119,6 +134,31 @@ def load_config():
     return cfg
 
 
+def get_configured_platforms(config):
+    """
+    Get the list of normalized platforms to monitor.
+    Supports config key 'platforms' (list or string), 'platform' (string or list),
+    or environment variables 'PLATFORMS' / 'PLATFORM'.
+    Options: 'all', 'bybit', 'binance', 'okx', 'kucoin'.
+    """
+    env_plat = os.environ.get("PLATFORMS") or os.environ.get("PLATFORM")
+    raw = env_plat if env_plat is not None else config.get("platforms", config.get("platform", "all"))
+
+    if isinstance(raw, str):
+        parts = [p.strip().lower() for p in raw.replace(";", ",").split(",") if p.strip()]
+    elif isinstance(raw, (list, tuple)):
+        parts = [str(p).strip().lower() for p in raw if str(p).strip()]
+    else:
+        parts = ["all"]
+
+    if not parts or "all" in parts:
+        return ["bybit", "binance", "okx", "kucoin"]
+
+    valid = ["bybit", "binance", "okx", "kucoin"]
+    filtered = [p for p in parts if p in valid]
+    return filtered if filtered else ["bybit", "binance", "okx", "kucoin"]
+
+
 def get_budget_range(config):
     """
     Extract (min_budget_dzd, max_budget_dzd) from config.
@@ -140,7 +180,7 @@ def get_budget_range(config):
         val = float(config["buy_amount_usd"]) * ref_price
         min_b = max_b = val
     else:
-        min_b = 10000.0
+        min_b = 2000.0
         max_b = 13000.0
 
     if min_b > max_b:
@@ -150,76 +190,90 @@ def get_budget_range(config):
 
 def is_buyer_eligible(item, config):
     """
-    Check if the buyer is eligible according to the merchant's trading preferences (tradingPreferenceSet).
-    Specifically handles infrequent buyers (e.g. < 5 purchases/month) who are blocked by merchants
-    requiring 5, 10, or 60 completed orders in the last 30 days.
+    Check if the buyer is eligible according to the merchant's trading preferences.
+    Dispatches to platform-specific eligibility rules (Bybit, Binance, OKX, KuCoin).
     """
     profile = config.get("buyer_profile", {})
     if not profile.get("filter_eligible_only", True):
         return True, "Filtre désactivé"
 
-    pref = item.get("tradingPreferenceSet") or {}
+    platform = item.get("platform", "").lower()
+    raw = item.get("raw", {})
+    user_orders = int(profile.get("completed_orders_30d", 0))
+    has_kyc = bool(profile.get("has_kyc", True))
+    user_age = int(profile.get("account_age_days", 90))
+    user_rate = float(profile.get("completion_rate_30d", 100.0))
+    user_nat = str(profile.get("nationality", "DZA")).strip().upper()
 
-    # 1. Check required completed orders in last 30 days
-    if pref.get("hasOrderFinishNumberDay30") in (1, "1", True):
-        try:
-            req_orders = int(pref.get("orderFinishNumberDay30") or 0)
-        except (ValueError, TypeError):
-            req_orders = 0
-        user_orders = int(profile.get("completed_orders_30d", 0))
-        if user_orders < req_orders:
-            return False, f"exige >= {req_orders} ordres/30j (profil acheteur: {user_orders})"
+    if platform == "bybit":
+        pref = raw.get("tradingPreferenceSet") or {}
+        if pref.get("hasOrderFinishNumberDay30") in (1, "1", True):
+            try:
+                req_orders = int(pref.get("orderFinishNumberDay30") or 0)
+            except (ValueError, TypeError):
+                req_orders = 0
+            if user_orders < req_orders:
+                return False, f"Bybit: exige >= {req_orders} ordres/30j (profil: {user_orders})"
+        if pref.get("isKyc") in (1, "1", True) and not has_kyc:
+            return False, "Bybit: exige KYC vérifié"
+        if pref.get("hasRegisterTime") in (1, "1", True):
+            try:
+                req_days = int(pref.get("registerTimeThreshold") or 0)
+            except (ValueError, TypeError):
+                req_days = 0
+            if user_age < req_days:
+                return False, f"Bybit: compte >= {req_days} jours (profil: {user_age}j)"
+        if pref.get("hasCompleteRateDay30") in (1, "1", True):
+            try:
+                req_rate = float(pref.get("completeRateDay30") or 0)
+            except (ValueError, TypeError):
+                req_rate = 0.0
+            if user_rate < req_rate:
+                return False, f"Bybit: taux >= {req_rate}% (profil: {user_rate}%)"
+        if pref.get("hasNationalLimit") in (1, "1", True):
+            req_nat = str(pref.get("nationalLimit") or "").strip().upper()
+            if req_nat and user_nat and req_nat != user_nat:
+                return False, f"Bybit: nationalité {req_nat} requise (profil: {user_nat})"
 
-    # 2. Check KYC requirement
-    if pref.get("isKyc") in (1, "1", True):
-        if not profile.get("has_kyc", True):
-            return False, "exige KYC vérifié"
+    elif platform == "binance":
+        adv = raw.get("adv", {})
+        b_buy = int(adv.get("userBuyTradeCountMin") or 0)
+        b_all = int(adv.get("userAllTradeCountMin") or 0)
+        req_orders = max(b_buy, b_all)
+        if req_orders > 0 and user_orders < req_orders:
+            return False, f"Binance: exige >= {req_orders} ordres (profil: {user_orders})"
+        b_days = int(adv.get("buyerRegDaysLimit") or 0)
+        if b_days > 0 and user_age < b_days:
+            return False, f"Binance: compte >= {b_days} jours (profil: {user_age}j)"
+        if adv.get("takerAdditionalKycRequired", 0) > 0 and not has_kyc:
+            return False, "Binance: exige KYC additionnel"
 
-    # 3. Check account registration age requirement (days)
-    if pref.get("hasRegisterTime") in (1, "1", True):
-        try:
-            req_days = int(pref.get("registerTimeThreshold") or 0)
-        except (ValueError, TypeError):
-            req_days = 0
-        user_age = int(profile.get("account_age_days", 90))
-        if user_age < req_days:
-            return False, f"compte créé depuis au moins {req_days} jours (profil: {user_age}j)"
+    elif platform == "okx":
+        min_orders = int(raw.get("minCompletedOrderQuantity") or 0)
+        if min_orders > 0 and user_orders < min_orders:
+            return False, f"OKX: exige >= {min_orders} ordres (profil: {user_orders})"
+        min_kyc = int(raw.get("minKycLevel") or 0)
+        if min_kyc > 1 and not has_kyc:
+            return False, f"OKX: exige KYC niveau {min_kyc}"
 
-    # 4. Check 30-day order completion rate requirement
-    if pref.get("hasCompleteRateDay30") in (1, "1", True):
-        try:
-            req_rate = float(pref.get("completeRateDay30") or 0)
-        except (ValueError, TypeError):
-            req_rate = 0.0
-        user_rate = float(profile.get("completion_rate_30d", 100.0))
-        if user_rate < req_rate:
-            return False, f"taux de réussite >= {req_rate}% (profil: {user_rate}%)"
-
-    # 5. Check nationality limit requirement
-    if pref.get("hasNationalLimit") in (1, "1", True):
-        req_nat = str(pref.get("nationalLimit") or "").strip().upper()
-        user_nat = str(profile.get("nationality", "DZA")).strip().upper()
-        if req_nat and user_nat and req_nat != user_nat:
-            return False, f"nationalité {req_nat} requise (profil: {user_nat})"
+    elif platform == "kucoin":
+        if raw.get("needKyc") == "YES" and not has_kyc:
+            return False, "KuCoin: exige KYC vérifié"
 
     return True, "Éligible"
 
 
-def get_p2p_items(token_id="USDT", currency_id="DZD", page=1, size=50):
-    """
-    Fetch P2P ads from Bybit.
-    side = '1' corresponds to Sell ads (sellers offering crypto for fiat).
-    """
+def fetch_bybit(token_id="USDT", currency_id="DZD", timeout=12):
+    """Fetch active P2P ads from Bybit."""
     payload = {
         "tokenId": token_id,
         "currencyId": currency_id,
         "side": "1",
-        "page": str(page),
-        "size": str(size),
+        "page": "1",
+        "size": "50",
         "authMaker": False,
         "canTrade": False
     }
-
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -227,24 +281,221 @@ def get_p2p_items(token_id="USDT", currency_id="DZD", page=1, size=50):
         "Origin": "https://www.bybit.com",
         "Referer": "https://www.bybit.com/fiat/otc/"
     }
-
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(BYBIT_P2P_URL, data=data, headers=headers, method="POST")
-
+    req = urllib.request.Request(BYBIT_P2P_URL, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     try:
-        with make_urlopen(req, timeout=15) as resp:
-            body = resp.read().decode("utf-8")
-            result = json.loads(body)
-            if result.get("ret_code") != 0:
-                print(f"[ATTENTION] Réponse Bybit code={result.get('ret_code')}: {result.get('ret_msg')}")
-                return []
-            return result.get("result", {}).get("items", []) or []
-    except urllib.error.URLError as e:
-        print(f"[ERREUR RÉSEAU] Impossible de joindre Bybit: {e}")
-        return []
+        with make_urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("ret_code") != 0:
+            return []
+        items = data.get("result", {}).get("items", []) or []
+        res = []
+        for it in items:
+            raw_payments = it.get("payments", [])
+            payments = []
+            for p in raw_payments:
+                if isinstance(p, dict) and p.get("paymentName"):
+                    payments.append(p.get("paymentName"))
+                elif isinstance(p, str):
+                    payments.append(p)
+            res.append({
+                "platform": "Bybit",
+                "id": f"bybit_{it.get('id')}",
+                "nickName": it.get("nickName", "Inconnu"),
+                "price": float(it.get("price", 0)),
+                "minAmount": float(it.get("minAmount", 0)),
+                "maxAmount": float(it.get("maxAmount", 0)),
+                "quantity": float(it.get("lastQuantity", it.get("quantity", 0))),
+                "recentOrderNum": int(it.get("recentOrderNum", 0)),
+                "recentExecuteRate": float(it.get("recentExecuteRate", 0)),
+                "payments": payments,
+                "url": "https://www.bybit.com/fiat/otc/",
+                "raw": it
+            })
+        return res
     except Exception as e:
-        print(f"[ERREUR] Erreur inattendue lors de la requête Bybit: {e}")
+        print(f"[BYBIT] Erreur de récupération: {e}")
         return []
+
+
+def fetch_binance(token_id="USDT", currency_id="DZD", timeout=12):
+    """Fetch active P2P ads from Binance."""
+    payload = {
+        "asset": token_id,
+        "fiat": currency_id,
+        "merchantCheck": False,
+        "page": 1,
+        "payTypes": [],
+        "publisherType": None,
+        "rows": 30,
+        "tradeType": "BUY"
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Origin": "https://p2p.binance.com",
+        "Referer": "https://p2p.binance.com/"
+    }
+    req = urllib.request.Request(BINANCE_P2P_URL, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with make_urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        items = data.get("data", []) or []
+        res = []
+        for it in items:
+            adv = it.get("adv", {})
+            adv_er = it.get("advertiser", {})
+            payments = [m.get("tradeMethodName") for m in adv.get("tradeMethods", []) if m.get("tradeMethodName")]
+            rate = float(adv_er.get("monthFinishRate", 0)) * 100
+            user_no = adv_er.get("userNo", "")
+            ad_url = f"https://p2p.binance.com/fr/advertiserDetail?userNo={user_no}" if user_no else "https://p2p.binance.com/fr/express/buy/USDT/DZD"
+            res.append({
+                "platform": "Binance",
+                "id": f"binance_{adv.get('advNo')}",
+                "nickName": adv_er.get("nickName", "Inconnu"),
+                "price": float(adv.get("price", 0)),
+                "minAmount": float(adv.get("minSingleTransAmount", 0)),
+                "maxAmount": float(adv.get("dynamicMaxSingleTransAmount", adv.get("maxSingleTransAmount", 0))),
+                "quantity": float(adv.get("tradableQuantity", adv.get("surplusAmount", 0))),
+                "recentOrderNum": int(adv_er.get("monthOrderCount", 0)),
+                "recentExecuteRate": round(rate, 1),
+                "payments": payments,
+                "url": ad_url,
+                "raw": it
+            })
+        return res
+    except Exception as e:
+        print(f"[BINANCE] Erreur de récupération: {e}")
+        return []
+
+
+def fetch_okx(token_id="USDT", currency_id="DZD", timeout=12):
+    """
+    Fetch active P2P sell ads from OKX (merchants selling crypto to buyers).
+    side=sell represents sellers offering USDT for fiat.
+    """
+    url = f"https://www.okx.com/v3/c2c/tradingOrders/books?quoteCurrency={currency_id.lower()}&baseCurrency={token_id.lower()}&side=sell&paymentMethod=all&userType=all&showTrade=false&showAlreadyTraded=false&isAbleFilter=false"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Referer": "https://www.okx.com/p2p-markets/dzd/buy-usdt"
+    }
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with make_urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        items = data.get("data", {}).get("sell", []) or []
+        res = []
+        for it in items:
+            rate = float(it.get("completedRate", 0)) * 100
+            res.append({
+                "platform": "OKX",
+                "id": f"okx_{it.get('id')}",
+                "nickName": it.get("nickName", "Inconnu"),
+                "price": float(it.get("price", 0)),
+                "minAmount": float(it.get("quoteMinAmountPerOrder", 0)),
+                "maxAmount": float(it.get("quoteMaxAmountPerOrder", 0)),
+                "quantity": float(it.get("availableAmount", 0)),
+                "recentOrderNum": int(it.get("completedOrderQuantity", 0)),
+                "recentExecuteRate": round(rate, 1),
+                "payments": it.get("paymentMethods", []),
+                "url": "https://www.okx.com/p2p-markets/dzd/buy-usdt",
+                "raw": it
+            })
+        return res
+    except Exception as e:
+        print(f"[OKX] Erreur de récupération: {e}")
+        return []
+
+
+def fetch_kucoin(token_id="USDT", currency_id="DZD", timeout=12):
+    """
+    Fetch active P2P ads from KuCoin.
+    Filters out merchants who are offline.
+    """
+    url = f"https://www.kucoin.com/_api/otc/ad/list?status=PUTUP&currency={token_id.upper()}&legal={currency_id.upper()}&page=1&pageSize=20&side=SELL"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Referer": "https://www.kucoin.com/otc"
+    }
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with make_urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        items = data.get("items", []) or []
+        res = []
+        for it in items:
+            # Skip merchants who are offline or inactive
+            if str(it.get("onlineStatus", "")).upper() == "OFFLINE" and not it.get("online", False):
+                continue
+
+            rate_str = str(it.get("dealOrderRate", "0")).replace("%", "")
+            try:
+                rate = float(rate_str)
+            except Exception:
+                rate = 0.0
+            p = float(it.get("floatPrice") or it.get("premium", 0))
+            res.append({
+                "platform": "KuCoin",
+                "id": f"kucoin_{it.get('id')}",
+                "nickName": it.get("nickName", "Inconnu"),
+                "price": p,
+                "minAmount": float(it.get("limitMinQuote", 0)),
+                "maxAmount": float(it.get("limitMaxQuote", 0)),
+                "quantity": float(it.get("currencyBalanceQuantity", it.get("currencyQuantity", 0))),
+                "recentOrderNum": int(it.get("dealOrderNum", 0)),
+                "recentExecuteRate": round(rate, 1),
+                "payments": ["BaridiMob / CCP"],
+                "url": "https://www.kucoin.com/otc/buy/USDT/DZD",
+                "raw": it
+            })
+        return res
+    except Exception as e:
+        print(f"[KUCOIN] Erreur de récupération: {e}")
+        return []
+
+
+def get_p2p_items(token_id="USDT", currency_id="DZD", page=1, size=50):
+    """Backward compatibility helper - fetches Bybit items."""
+    return fetch_bybit(token_id=token_id, currency_id=currency_id)
+
+
+def fetch_all_offers(config):
+    """
+    Fetch P2P items across all configured platforms in parallel using ThreadPoolExecutor.
+    Returns (all_items, platform_stats).
+    """
+    platforms = get_configured_platforms(config)
+    token_id = config.get("token_id", "USDT")
+    currency_id = config.get("currency_id", "DZD")
+
+    fetch_map = {
+        "bybit": fetch_bybit,
+        "binance": fetch_binance,
+        "okx": fetch_okx,
+        "kucoin": fetch_kucoin
+    }
+
+    all_items = []
+    platform_stats = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(platforms) or 1) as executor:
+        future_to_plat = {
+            executor.submit(fetch_map[plat], token_id, currency_id): plat
+            for plat in platforms if plat in fetch_map
+        }
+        for future in concurrent.futures.as_completed(future_to_plat):
+            plat = future_to_plat[future]
+            try:
+                items = future.result()
+                platform_stats[plat] = len(items)
+                all_items.extend(items)
+            except Exception as e:
+                print(f"[{plat.upper()}] Échec du fetch: {e}")
+                platform_stats[plat] = 0
+
+    return all_items, platform_stats
 
 
 def send_telegram(text, config):
@@ -270,7 +521,7 @@ def send_telegram(text, config):
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "BybitNotifier/2.0"},
+        headers={"Content-Type": "application/json", "User-Agent": "P2PNotifier/3.0"},
         method="POST"
     )
 
@@ -292,6 +543,10 @@ def send_telegram(text, config):
 
 def build_telegram_message(matched_items, min_price, max_price, min_budget, max_budget, token_id, currency_id):
     """Build a clean, high-priority HTML formatted message for Telegram."""
+    best = matched_items[0]
+    best_platform = best.get("platform", "P2P")
+    best_price = float(best.get("price", 0))
+
     if min_budget == max_budget:
         budget_str = f"{min_budget:,.0f} {currency_id}".replace(",", " ")
     else:
@@ -300,35 +555,38 @@ def build_telegram_message(matched_items, min_price, max_price, min_budget, max_
     price_range_str = f"{min_price:.2f} - {max_price:.2f} {currency_id}" if min_price else f"<= {max_price:.2f} {currency_id}"
 
     lines = [
-        "🚨 <b>ALERTE BYBIT P2P DÉTECTÉE !</b>",
+        f"🚨 <b>ALERTE P2P MULTI-PLATEFORMES !</b>",
+        f"🏆 <b>Meilleur prix :</b> <code>{best_price:.2f} {currency_id}</code> ({best_platform})",
         f"🎯 <b>Cible :</b> <code>{price_range_str}</code>",
         f"💼 <b>Budget :</b> <code>{budget_str}</code>",
-        "🛡️ <b>Éligibilité :</b> <code>Vendeur compatible vérifié</code>",
         "────────────────────"
     ]
 
-    for item in matched_items[:4]:
+    for item in matched_items[:5]:
+        plat = item.get("platform", "P2P")
         nick = item.get("nickName", "Inconnu")
         price = float(item.get("price", 0))
-        min_amt = item.get("minAmount", "0")
-        max_amt = item.get("maxAmount", "0")
+        min_amt = float(item.get("minAmount", 0))
+        max_amt = float(item.get("maxAmount", 0))
         orders = item.get("recentOrderNum", 0)
         rate = item.get("recentExecuteRate", 0)
+        url = item.get("url", "https://www.bybit.com/fiat/otc/")
 
         if min_budget == max_budget:
             crypto_est = f"~{min_budget / price:.2f} {token_id}"
         else:
             crypto_est = f"~{min_budget / price:.2f} à ~{max_budget / price:.2f} {token_id}"
 
+        lim_str = f"{min_amt:,.0f} à {max_amt:,.0f} {currency_id}".replace(",", " ")
         lines.append(
-            f"👤 <b>{nick}</b>\n"
+            f"🏷️ [<b>{plat}</b>] <b>{nick}</b>\n"
             f"💵 Prix : <b>{price:.2f} {currency_id}</b> / {token_id}\n"
             f"🪙 Obtenu : <b>{crypto_est}</b>\n"
-            f"📊 Limites : {min_amt} à {max_amt} {currency_id}\n"
+            f"📊 Limites : {lim_str}\n"
             f"⭐ Ordres : {orders} ({rate}%)\n"
+            f"👉 <a href=\"{url}\"><b>Acheter sur {plat}</b></a>\n"
         )
 
-    lines.append('🔗 <a href="https://www.bybit.com/fiat/otc/">👉 <b>Ouvrir Bybit P2P pour acheter</b></a>')
     return "\n".join(lines)
 
 
@@ -347,7 +605,7 @@ def send_discord(content, config):
     req = urllib.request.Request(
         webhook_url,
         data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "BybitNotifier/2.0"},
+        headers={"Content-Type": "application/json", "User-Agent": "P2PNotifier/3.0"},
         method="POST"
     )
 
@@ -380,7 +638,7 @@ def send_email(subject, html_body, text_body, config):
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = f"Alerte Bybit P2P <{sender}>"
+    msg["From"] = f"Alerte P2P Multi-Exchange <{sender}>"
     msg["To"] = receiver
 
     part1 = MIMEText(text_body, "plain", "utf-8")
@@ -410,66 +668,70 @@ def send_email(subject, html_body, text_body, config):
 
 
 def build_alert_message(matched_items, min_price, max_price, min_budget, max_budget, token_id, currency_id):
-    """Build formatted plain text and HTML emails for matching offers."""
+    """Build formatted plain text and HTML emails for matching offers across platforms."""
     first_item = matched_items[0]
     first_price = float(first_item.get("price", 0))
+    first_platform = first_item.get("platform", "P2P")
 
     if min_budget == max_budget:
-        budget_str = f"{min_budget:.0f} {currency_id}"
+        budget_str = f"{min_budget:,.0f} {currency_id}".replace(",", " ")
     else:
-        budget_str = f"{min_budget:.0f} à {max_budget:.0f} {currency_id}"
+        budget_str = f"{min_budget:,.0f} à {max_budget:,.0f} {currency_id}".replace(",", " ")
 
     price_range_str = f"{min_price:.2f} à {max_price:.2f} {currency_id}" if min_price else f"<= {max_price:.2f} {currency_id}"
-    subject = f"🔥 Alerte Bybit P2P : {first_price:.2f} {currency_id} pour 1 {token_id} (Budget {budget_str})"
+    subject = f"🔥 Alerte P2P : {first_price:.2f} {currency_id} sur {first_platform} (Budget {budget_str})"
 
     rows_html = ""
     rows_text = ""
 
     for item in matched_items:
+        plat = item.get("platform", "P2P")
         nick = item.get("nickName", "Inconnu")
         price = float(item.get("price", 0))
-        min_amt = item.get("minAmount", "0")
-        max_amt = item.get("maxAmount", "0")
-        qty = item.get("quantity", "0")
+        min_amt = float(item.get("minAmount", 0))
+        max_amt = float(item.get("maxAmount", 0))
+        qty = item.get("quantity", 0)
         orders = item.get("recentOrderNum", 0)
         rate = item.get("recentExecuteRate", 0)
+        url = item.get("url", "https://p2p.binance.com")
 
         if min_budget == max_budget:
             crypto_detail = f"~{min_budget / price:.2f} {token_id}"
         else:
             crypto_detail = f"~{min_budget / price:.2f} à ~{max_budget / price:.2f} {token_id}"
 
+        lim_str = f"{min_amt:,.0f} - {max_amt:,.0f} {currency_id}".replace(",", " ")
+
         rows_text += (
-            f"\n- Vendeur: {nick}\n"
+            f"\n- [{plat}] {nick}\n"
             f"  Prix: {price:.2f} {currency_id} / {token_id}\n"
             f"  Pour votre budget ({budget_str}): {crypto_detail}\n"
-            f"  Limites vendeur: {min_amt} - {max_amt} {currency_id}\n"
-            f"  Disponible vendeur: {qty} {token_id}\n"
+            f"  Limites vendeur: {lim_str}\n"
             f"  Ordres récents: {orders} (Taux: {rate}%)\n"
+            f"  Lien: {url}\n"
         )
 
         rows_html += f"""
         <tr style="border-bottom: 1px solid #e0e0e0;">
+            <td style="padding: 12px; font-weight: bold; color: #f59e0b;">{plat}</td>
             <td style="padding: 12px; font-weight: bold; color: #1e293b;">{nick}</td>
             <td style="padding: 12px; color: #16a34a; font-weight: bold; font-size: 16px;">{price:.2f} {currency_id}</td>
             <td style="padding: 12px; font-weight: bold; color: #0284c7;">{crypto_detail}</td>
-            <td style="padding: 12px; color: #64748b;">{min_amt} à {max_amt} {currency_id}</td>
+            <td style="padding: 12px; color: #64748b;">{lim_str}</td>
             <td style="padding: 12px; color: #64748b;">{orders} ({rate}%)</td>
+            <td style="padding: 12px;"><a href="{url}" style="color:#0284c7; font-weight:bold; text-decoration:none;">Ouvrir</a></td>
         </tr>
         """
 
     text_body = f"""Bonjour,
 
-Une ou plusieurs offres correspondent à vos critères sur Bybit P2P !
+Une ou plusieurs offres correspondent à vos critères sur les marchés P2P !
 
 Critères configurés :
 - Prix recherché : {price_range_str}
 - Fourchette de budget : {budget_str} (limites vendeur compatibles)
 
 Offres trouvées :{rows_text}
-
-Lien direct vers Bybit P2P :
-https://www.bybit.com/fiat/otc/
 
 Bon achat !
 """
@@ -480,11 +742,11 @@ Bon achat !
 <meta charset="utf-8">
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; padding: 20px; margin: 0;">
-    <div style="max-width: 680px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); overflow: hidden; border: 1px solid #e2e8f0;">
+    <div style="max-width: 780px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); overflow: hidden; border: 1px solid #e2e8f0;">
         <div style="background: linear-gradient(135deg, #f59e0b, #d97706); padding: 24px; color: #ffffff; text-align: center;">
-            <h1 style="margin: 0; font-size: 24px;">🚀 Alerte Bybit P2P Déclenchée</h1>
+            <h1 style="margin: 0; font-size: 24px;">🚀 Alerte P2P Multi-Plateformes Déclenchée</h1>
             <p style="margin: 8px 0 0 0; opacity: 0.95; font-size: 15px;">
-                Prix cible atteint : <strong>{price_range_str}</strong> | Budget : <strong>{budget_str}</strong>
+                Meilleur prix sur <strong>{first_platform}</strong> : <strong>{first_price:.2f} {currency_id}</strong> | Budget : <strong>{budget_str}</strong>
             </p>
         </div>
         <div style="padding: 24px;">
@@ -494,11 +756,13 @@ Bon achat !
             <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; text-align: left;">
                 <thead>
                     <tr style="background-color: #f1f5f9; color: #475569;">
+                        <th style="padding: 10px 12px;">Plateforme</th>
                         <th style="padding: 10px 12px;">Vendeur</th>
                         <th style="padding: 10px 12px;">Prix / {token_id}</th>
-                        <th style="padding: 10px 12px;">Reçu pour votre budget</th>
+                        <th style="padding: 10px 12px;">Reçu estimé</th>
                         <th style="padding: 10px 12px;">Limites vendeur</th>
                         <th style="padding: 10px 12px;">Taux</th>
+                        <th style="padding: 10px 12px;">Lien</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -506,14 +770,14 @@ Bon achat !
                 </tbody>
             </table>
             <div style="text-align: center; margin: 30px 0 10px 0;">
-                <a href="https://www.bybit.com/fiat/otc/" target="_blank"
+                <a href="{first_item.get('url', 'https://p2p.binance.com')}" target="_blank"
                    style="background-color: #0284c7; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 8px; font-weight: bold; display: inline-block;">
-                   Ouvrir Bybit P2P
+                   Ouvrir l'offre sur {first_platform}
                 </a>
             </div>
         </div>
         <div style="background-color: #f8fafc; padding: 14px; text-align: center; font-size: 12px; color: #94a3b8; border-top: 1px solid #e2e8f0;">
-            Alerte automatique générée à {datetime.now().strftime('%H:%M:%S')}
+            Alerte automatique multi-plateformes générée à {datetime.now().strftime('%H:%M:%S')}
         </div>
     </div>
 </body>
@@ -524,12 +788,14 @@ Bon achat !
 
 def test_telegram(config):
     """Send a test message via Telegram."""
+    platforms = [p.capitalize() for p in get_configured_platforms(config)]
     print("[TEST TELEGRAM] Envoi d'un message test...")
     text = (
-        "🤖 <b>Test de Notification Bybit P2P</b>\n\n"
+        "🤖 <b>Test de Notification P2P Multi-Plateformes</b>\n\n"
         "✅ Votre bot Telegram est parfaitement connecté et configuré !\n"
+        f"🌐 <b>Plateformes surveillées :</b> {', '.join(platforms)}\n"
         f"⏰ Horodatage : <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n\n"
-        "Vous recevrez une alerte instantanée dès qu'une offre compatible est trouvée."
+        "Vous recevrez une alerte instantanée dès qu'une offre compatible est trouvée avec le meilleur prix parmi toutes les plateformes."
     )
     ok, msg = send_telegram(text, config)
     if ok:
@@ -542,7 +808,7 @@ def test_telegram(config):
 def test_discord(config):
     """Send a test message via Discord webhook."""
     print("[TEST DISCORD] Envoi d'un message test...")
-    content = f"🧪 **Test Réussi !** Le webhook Discord du notificateur Bybit P2P fonctionne correctement. ({datetime.now().strftime('%H:%M:%S')})"
+    content = f"🧪 **Test Réussi !** Le webhook Discord du notificateur P2P Multi-Plateformes fonctionne correctement. ({datetime.now().strftime('%H:%M:%S')})"
     ok, msg = send_discord(content, config)
     if ok:
         print("[TEST DISCORD] ✅ Succès ! Message envoyé sur Discord.")
@@ -554,13 +820,13 @@ def test_discord(config):
 def test_email(config):
     """Send a test email to verify credentials."""
     print("[TEST EMAIL] Envoi d'un email de test...")
-    sub = "🧪 Test de notification - Bybit P2P Alert"
+    sub = "🧪 Test de notification - P2P Multi-Exchange Alert"
     text = "Ceci est un email de test pour confirmer que vos paramètres SMTP fonctionnent correctement."
     html = f"""
     <html>
     <body style="font-family: Arial, sans-serif; padding: 20px;">
         <h2 style="color: #0284c7;">Test Réussi !</h2>
-        <p>Vos paramètres d'envoi d'email pour le script Bybit P2P fonctionnent parfaitement.</p>
+        <p>Vos paramètres d'envoi d'email pour le script P2P Alert fonctionnent parfaitement.</p>
         <p><small>Horodatage : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small></p>
     </body>
     </html>
@@ -575,33 +841,75 @@ def test_email(config):
 
 def run_check(config, alerted_ads):
     """
-    Run a single check of Bybit P2P prices and dispatch notifications across configured channels.
+    Run a single check of P2P prices across configured exchanges and dispatch notifications.
     """
     min_price_cfg = config.get("target_min_price")
     min_price = float(min_price_cfg) if min_price_cfg is not None and float(min_price_cfg) > 0 else None
-    max_price = float(config.get("target_max_price", 250.0))
+    max_price = float(config.get("target_max_price", 255.0))
 
     min_budget, max_budget = get_budget_range(config)
     token_id = config.get("token_id", "USDT")
     currency_id = config.get("currency_id", "DZD")
     cooldown_seconds = config.get("notification_cooldown_minutes", 15) * 60
 
-    # Fetch top 50 offers to ensure we see all active sellers
-    items = get_p2p_items(token_id=token_id, currency_id=currency_id, page=1, size=50)
-
+    active_platforms = get_configured_platforms(config)
     now_ts = time.time()
     now_str = datetime.now().strftime("%H:%M:%S")
 
+    # Fetch offers across all configured platforms in parallel
+    items, platform_stats = fetch_all_offers(config)
+
+    plat_summary = ", ".join([f"{p.upper()}: {cnt}" for p, cnt in platform_stats.items()])
+    print(f"[{now_str}] Offres récupérées ({plat_summary})")
+
+    if min_budget == max_budget:
+        budget_label = f"{min_budget:,.0f} {currency_id}".replace(",", " ")
+    else:
+        budget_label = f"{min_budget:,.0f}-{max_budget:,.0f} {currency_id}".replace(",", " ")
+
+    target_range_str = f"[{min_price:.2f} - {max_price:.2f} {currency_id}]" if min_price else f"<= {max_price:.2f} {currency_id}"
+
     if not items:
-        print(f"[{now_str}] Aucune offre disponible pour le moment sur Bybit ({token_id}/{currency_id}).")
-        return None
+        print(f"[{now_str}] Aucune offre disponible pour le moment ({token_id}/{currency_id}).")
+        return {
+            "time": now_str,
+            "best_price": None,
+            "best_platform": None,
+            "seller": None,
+            "limits": None,
+            "matched_count": 0,
+            "target_range": target_range_str,
+            "budget_label": budget_label,
+            "active_platforms": active_platforms,
+            "platform_stats": platform_stats,
+            "platform_best": {},
+            "notifications_sent": [],
+            "telegram_active": bool(config.get("telegram", {}).get("enabled", True) and config.get("telegram", {}).get("bot_token") and config.get("telegram", {}).get("chat_id")),
+            "email_active": bool(config.get("email", {}).get("enabled", True) and config.get("email", {}).get("sender_email")),
+            "ineligible_count": 0,
+            "eligible_filter_active": bool(config.get("buyer_profile", {}).get("filter_eligible_only", True))
+        }
 
     # Extract valid price items that pass buyer eligibility check
     valid_items = []
     ineligible_items = []
+    platform_best = {}
+
     for item in items:
         try:
             p = float(item.get("price", 0))
+            if p <= 0:
+                continue
+
+            plat = item.get("platform", "P2P")
+            if plat not in platform_best or p < platform_best[plat]["price"]:
+                platform_best[plat] = {
+                    "price": p,
+                    "seller": item.get("nickName"),
+                    "limits": f"{item.get('minAmount', 0):,.0f} à {item.get('maxAmount', 0):,.0f} {currency_id}".replace(",", " "),
+                    "url": item.get("url")
+                }
+
             is_ok, reason = is_buyer_eligible(item, config)
             if not is_ok:
                 ineligible_items.append((p, item, reason))
@@ -613,21 +921,25 @@ def run_check(config, alerted_ads):
     valid_items.sort(key=lambda x: x[0])
 
     if ineligible_items:
-        excluded_preview = ", ".join([f"{it.get('nickName')} ({rs})" for _, it, rs in ineligible_items[:3]])
+        excluded_preview = ", ".join([f"{it.get('platform')}:{it.get('nickName')} ({rs})" for _, it, rs in ineligible_items[:3]])
         more_cnt = len(ineligible_items) - 3
         more_str = f" et +{more_cnt} autre(s)" if more_cnt > 0 else ""
         print(f"[{now_str}] 🛡️ {len(ineligible_items)} offre(s) écartée(s) (critères d'éligibilité non remplis : {excluded_preview}{more_str})")
 
     if not valid_items:
-        print(f"[{now_str}] Aucune offre éligible disponible actuellement sur Bybit.")
+        print(f"[{now_str}] Aucune offre éligible disponible actuellement sur les marchés surveillés.")
         return {
             "time": now_str,
             "best_price": None,
+            "best_platform": None,
             "seller": None,
             "limits": None,
             "matched_count": 0,
             "target_range": target_range_str,
             "budget_label": budget_label,
+            "active_platforms": active_platforms,
+            "platform_stats": platform_stats,
+            "platform_best": platform_best,
             "notifications_sent": [],
             "telegram_active": bool(config.get("telegram", {}).get("enabled", True) and config.get("telegram", {}).get("bot_token") and config.get("telegram", {}).get("chat_id")),
             "email_active": bool(config.get("email", {}).get("enabled", True) and config.get("email", {}).get("sender_email")),
@@ -635,30 +947,44 @@ def run_check(config, alerted_ads):
             "eligible_filter_active": bool(config.get("buyer_profile", {}).get("filter_eligible_only", True))
         }
 
-    if min_budget == max_budget:
-        budget_label = f"{min_budget:.0f} {currency_id}"
-    else:
-        budget_label = f"{min_budget:.0f}-{max_budget:.0f} {currency_id}"
-
-    target_range_str = f"[{min_price:.2f} - {max_price:.2f} {currency_id}]" if min_price else f"<= {max_price:.2f} {currency_id}"
-
-    # Find the best price that accepts the user's budget range
+    # Find the best price that accepts the user's budget range within target price
     best_matching_offer = None
     for p, it in valid_items:
+        if min_price is not None and p < min_price:
+            continue
+        if p > max_price:
+            continue
         min_a = float(it.get("minAmount", 0))
         max_a = float(it.get("maxAmount", 0))
         if min_a <= max_budget and (max_a >= min_budget or max_a == 0):
             best_matching_offer = (p, it)
             break
 
+    # If none found within target price, find best compatible offer above min_price (or first valid)
+    if not best_matching_offer:
+        for p, it in valid_items:
+            if min_price is not None and p < min_price:
+                continue
+            min_a = float(it.get("minAmount", 0))
+            max_a = float(it.get("maxAmount", 0))
+            if min_a <= max_budget and (max_a >= min_budget or max_a == 0):
+                best_matching_offer = (p, it)
+                break
+
     if best_matching_offer:
         bp, bi = best_matching_offer
-        b_min = bi.get('minAmount')
-        b_max = bi.get('maxAmount')
-        print(f"[{now_str}] Meilleur prix compatible ({budget_label}): {bp:.2f} {currency_id} | Vendeur: {bi.get('nickName')} (Limites: {b_min} - {b_max} {currency_id}) | Cible: {target_range_str}")
+        b_plat = bi.get('platform', 'P2P')
+        b_min = bi.get('minAmount', 0)
+        b_max = bi.get('maxAmount', 0)
+        lim_fmt = f"{b_min:,.0f} à {b_max:,.0f} {currency_id}".replace(",", " ")
+        print(f"[{now_str}] 🏆 Meilleur prix compatible ({budget_label}): {bp:.2f} {currency_id} sur [{b_plat}] | Vendeur: {bi.get('nickName')} (Limites: {lim_fmt}) | Cible: {target_range_str}")
     else:
         first_p, first_item = valid_items[0]
-        print(f"[{now_str}] Aucune offre acceptant ({budget_label}). Meilleur prix brut marché: {first_p:.2f} {currency_id} ({first_item.get('nickName')}, Limites: {first_item.get('minAmount')} - {first_item.get('maxAmount')}) | Cible: {target_range_str}")
+        f_plat = first_item.get('platform', 'P2P')
+        f_min = first_item.get('minAmount', 0)
+        f_max = first_item.get('maxAmount', 0)
+        lim_fmt = f"{f_min:,.0f} à {f_max:,.0f} {currency_id}".replace(",", " ")
+        print(f"[{now_str}] Aucune offre acceptant ({budget_label}). Meilleur prix brut marché: {first_p:.2f} {currency_id} sur [{f_plat}] ({first_item.get('nickName')}, Limites: {lim_fmt}) | Cible: {target_range_str}")
 
     # Filter matching items by price range and limit compatibility
     matched = []
@@ -683,7 +1009,8 @@ def run_check(config, alerted_ads):
     notifications_sent = []
 
     if matched:
-        print(f"[{now_str}] 🎉 {len(matched)} offre(s) trouvée(s) dans la fourchette {target_range_str} acceptant ({budget_label}) !")
+        winner = matched[0]
+        print(f"[{now_str}] 🎉 {len(matched)} offre(s) trouvée(s) dans la fourchette {target_range_str} acceptant ({budget_label}) ! (Top: {winner.get('price')} {currency_id} sur {winner.get('platform')})")
 
         # 1. Telegram Alert
         tg_cfg = config.get("telegram", {})
@@ -697,7 +1024,7 @@ def run_check(config, alerted_ads):
         # 2. Discord Alert
         dc_cfg = config.get("discord", {})
         if dc_cfg.get("enabled", False) and dc_cfg.get("webhook_url"):
-            dc_text = f"🚀 **Alerte Bybit P2P** : {len(matched)} offre(s) compatible(s) trouvée(s) ! Meilleur prix: {matched[0].get('price')} {currency_id}. https://www.bybit.com/fiat/otc/"
+            dc_text = f"🚀 **Alerte P2P** : {len(matched)} offre(s) compatible(s) trouvée(s) ! Meilleur prix: {matched[0].get('price')} {currency_id} sur **{matched[0].get('platform')}** ({matched[0].get('nickName')}). {matched[0].get('url')}"
             ok, msg = send_discord(dc_text, config)
             notifications_sent.append({"channel": "Discord", "success": ok, "detail": msg, "time": now_str})
 
@@ -714,11 +1041,15 @@ def run_check(config, alerted_ads):
     return {
         "time": now_str,
         "best_price": bp if best_matching_offer else (first_p if valid_items else None),
+        "best_platform": bi.get('platform') if best_matching_offer else (first_item.get('platform') if valid_items else None),
         "seller": bi.get('nickName') if best_matching_offer else (first_item.get('nickName') if valid_items else None),
-        "limits": f"{b_min} à {b_max} {currency_id}" if best_matching_offer else None,
+        "limits": f"{b_min:,.0f} à {b_max:,.0f} {currency_id}".replace(",", " ") if best_matching_offer else None,
         "matched_count": len(matched),
         "target_range": target_range_str,
         "budget_label": budget_label,
+        "active_platforms": active_platforms,
+        "platform_stats": platform_stats,
+        "platform_best": platform_best,
         "notifications_sent": notifications_sent,
         "telegram_active": tg_active,
         "email_active": email_active,
@@ -728,7 +1059,7 @@ def run_check(config, alerted_ads):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Moniteur de prix Bybit P2P avec alertes Telegram & Email.")
+    parser = argparse.ArgumentParser(description="Moniteur de prix P2P Multi-Plateformes (Bybit, Binance, OKX, KuCoin) avec alertes Telegram & Email.")
     parser.add_argument("--test-email", action="store_true", help="Envoyer un email de test pour valider la configuration SMTP.")
     parser.add_argument("--test-telegram", action="store_true", help="Envoyer un message de test sur Telegram.")
     parser.add_argument("--test-discord", action="store_true", help="Envoyer un message de test sur Discord.")
@@ -748,10 +1079,11 @@ def main():
         return
 
     min_p = config.get("target_min_price")
-    max_p = float(config.get("target_max_price", 250.0))
+    max_p = float(config.get("target_max_price", 255.0))
     min_budget, max_budget = get_budget_range(config)
     curr = config.get("currency_id", "DZD")
     tok = config.get("token_id", "USDT")
+    active_plats = [p.capitalize() for p in get_configured_platforms(config)]
 
     tg_ready = bool(config.get("telegram", {}).get("enabled", True) and config.get("telegram", {}).get("bot_token") and config.get("telegram", {}).get("chat_id"))
     em_ready = bool(config.get("email", {}).get("enabled", False) and config.get("email", {}).get("sender_email") and config.get("email", {}).get("sender_password"))
@@ -760,24 +1092,25 @@ def main():
     filt_on = buyer_cfg.get("filter_eligible_only", True)
     ord_lim = buyer_cfg.get("completed_orders_30d", 0)
 
-    print("=" * 60)
-    print("🚀 DÉMARRAGE DU MONITEUR BYBIT P2P")
+    print("=" * 65)
+    print("🚀 DÉMARRAGE DU MONITEUR P2P MULTI-PLATEFORMES")
+    print(f"• Plateformes surveillées : {', '.join(active_plats)}")
     print(f"• Crypto / Devise : {tok} / {curr}")
     if min_budget == max_budget:
-        print(f"• Budget d'achat souhaité : {min_budget:.0f} {curr} (soit ~{min_budget / max_p:.2f} {tok} à {max_p:.2f} {curr})")
+        print(f"• Budget d'achat : {min_budget:,.0f} {curr} (~{min_budget / max_p:.2f} {tok} à {max_p:.2f} {curr})".replace(",", " "))
     else:
-        print(f"• Fourchette de budget d'achat : {min_budget:.0f} à {max_budget:.0f} {curr} (soit ~{min_budget / max_p:.2f} à ~{max_budget / max_p:.2f} {tok} à {max_p:.2f} {curr})")
+        print(f"• Fourchette de budget : {min_budget:,.0f} à {max_budget:,.0f} {curr} (~{min_budget / max_p:.2f} à ~{max_budget / max_p:.2f} {tok})".replace(",", " "))
 
     if min_p is not None and float(min_p) > 0:
         print(f"• Fourchette de prix d'alerte : {float(min_p):.2f} à {max_p:.2f} {curr}")
     else:
         print(f"• Prix max d'alerte : <= {max_p:.2f} {curr}")
 
-    print(f"• Filtre éligibilité vendeur : {'✅ Actif (exclut vendeurs exigeant > ' + str(ord_lim) + ' ordres/30j)' if filt_on else '❌ Désactivé'}")
+    print(f"• Filtre éligibilité vendeur : {'✅ Actif (exclut vendeurs exigeant > ' + str(ord_lim) + ' ordres)' if filt_on else '❌ Désactivé'}")
     print(f"• Intervalle de test : {config.get('check_interval_seconds', 30)} secondes")
-    print(f"• Canal Telegram : {'✅ Configuré (Recommandé Cloud)' if tg_ready else '⚠️ Non configuré (bot_token/chat_id manquants)'}")
+    print(f"• Canal Telegram : {'✅ Configuré (Recommandé Cloud)' if tg_ready else '⚠️ Non configuré'}")
     print(f"• Canal Email : {'✅ Configuré' if em_ready else '⚪ Désactivé'}")
-    print("=" * 60)
+    print("=" * 65)
 
     alerted_ads = {}
 
