@@ -40,7 +40,6 @@ latest_state = {
     "platform_stats": {},
     "platform_best": {},
     "telegram_active": False,
-    "email_active": False,
     "eligible_filter_active": True,
     "ineligible_count": 0,
     "notifications_history": []
@@ -79,7 +78,6 @@ class HealthHandler(BaseHTTPRequestHandler):
         platform_stats = latest_state.get("platform_stats", {})
         platform_best = latest_state.get("platform_best", {})
         tg_active = latest_state.get("telegram_active", False)
-        email_active = latest_state.get("email_active", False)
         eligible_active = latest_state.get("eligible_filter_active", True)
         ineligible_cnt = latest_state.get("ineligible_count", 0)
         history = latest_state.get("notifications_history", [])
@@ -132,11 +130,6 @@ class HealthHandler(BaseHTTPRequestHandler):
             tg_badge = '<span class="status-pill status-ok">✅ Actif (Recommandé)</span>'
         else:
             tg_badge = '<span class="status-pill status-warn">⚠️ Non configuré</span>'
-
-        if email_active:
-            email_badge = '<span class="status-pill status-ok">Configuré (Gmail)</span>'
-        else:
-            email_badge = '<span class="status-pill status-muted">Désactivé</span>'
 
         # Build notification history HTML
         history_html = ""
@@ -405,10 +398,6 @@ class HealthHandler(BaseHTTPRequestHandler):
             <div class="info-row">
                 <span class="info-lbl">Alerte Telegram :</span>
                 <span>{tg_badge}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-lbl">Alerte Email :</span>
-                <span>{email_badge}</span>
             </div>
         </div>
 

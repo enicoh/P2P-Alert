@@ -23,14 +23,6 @@
   "discord": {
     "enabled": false,
     "webhook_url": ""
-  },
-  "email": {
-    "enabled": false,
-    "smtp_server": "smtp.gmail.com",
-    "smtp_port": 587,
-    "use_tls": true,
-    "sender_email": "votre_email@gmail.com",
-    "sender_password": "votre_mot_de_passe_application",
-    "receiver_email": "votre_email@gmail.com"
   }
 }
+

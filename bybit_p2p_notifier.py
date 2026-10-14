@@ -10,14 +10,11 @@ the desired price within your target purchase budget range.
 import sys
 import json
 import time
-import smtplib
 import argparse
 import ssl
 from datetime import datetime
 import urllib.request
 import urllib.error
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 import os
 import concurrent.futures
@@ -116,14 +113,6 @@ def load_config():
     if os.environ.get("DISCORD_ENABLED") is not None:
         dc_cfg["enabled"] = os.environ["DISCORD_ENABLED"].lower() in ("1", "true", "yes")
 
-    # Email configuration
-    email_cfg = cfg.setdefault("email", {})
-    if os.environ.get("SENDER_EMAIL"):
-        email_cfg["sender_email"] = os.environ["SENDER_EMAIL"].strip()
-    if os.environ.get("SENDER_PASSWORD"):
-        email_cfg["sender_password"] = os.environ["SENDER_PASSWORD"].strip()
-    if os.environ.get("RECEIVER_EMAIL"):
-        email_cfg["receiver_email"] = os.environ["RECEIVER_EMAIL"].strip()
 
     # Buyer eligibility configuration
     buyer_cfg = cfg.setdefault("buyer_profile", {})
@@ -625,172 +614,7 @@ def send_discord(content, config):
         return False, f"Échec de l'envoi Discord: {e}"
 
 
-def send_email(subject, html_body, text_body, config):
-    """Send an email using SMTP credentials configured in config.json."""
-    email_cfg = config.get("email", {})
-    if not email_cfg.get("enabled", True):
-        print("[INFO] Envoi d'email désactivé dans la configuration.")
-        return False, "Email désactivé dans la configuration"
 
-    sender = email_cfg.get("sender_email")
-    password = email_cfg.get("sender_password")
-    receiver = email_cfg.get("receiver_email")
-    smtp_server = email_cfg.get("smtp_server", "smtp.gmail.com")
-    smtp_port = email_cfg.get("smtp_port", 587)
-    use_tls = email_cfg.get("use_tls", True)
-
-    if not sender or not password or not receiver or "votre_email" in sender:
-        print("[ATTENTION] Veuillez renseigner 'sender_email', 'sender_password' et 'receiver_email' dans config.json !")
-        return False, "Identifiants email incomplets dans config.json"
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"Alerte P2P Multi-Exchange <{sender}>"
-    msg["To"] = receiver
-
-    part1 = MIMEText(text_body, "plain", "utf-8")
-    part2 = MIMEText(html_body, "html", "utf-8")
-    msg.attach(part1)
-    msg.attach(part2)
-
-    try:
-        if smtp_port == 465:
-            with smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=15) as server:
-                server.login(sender, password)
-                server.sendmail(sender, [receiver], msg.as_string())
-        else:
-            with smtplib.SMTP(smtp_server, smtp_port, timeout=15) as server:
-                if use_tls:
-                    server.starttls()
-                server.login(sender, password)
-                server.sendmail(sender, [receiver], msg.as_string())
-        print(f"[SUCCÈS] 📧 Email envoyé à {receiver} !")
-        return True, f"Email envoyé à {receiver}"
-    except Exception as e:
-        err_msg = str(e)
-        if "timed out" in err_msg.lower() or "110" in err_msg or "refused" in err_msg.lower():
-            err_msg += " (Port SMTP bloqué par l'hébergeur cloud, ex: Render Free)"
-        print(f"[ERREUR EMAIL] Échec de l'envoi de l'email: {err_msg}")
-        return False, err_msg
-
-
-def build_alert_message(matched_items, min_price, max_price, min_budget, max_budget, token_id, currency_id):
-    """Build formatted plain text and HTML emails for matching offers across platforms."""
-    first_item = matched_items[0]
-    first_price = float(first_item.get("price", 0))
-    first_platform = first_item.get("platform", "P2P")
-
-    if min_budget == max_budget:
-        budget_str = f"{min_budget:,.0f} {currency_id}".replace(",", " ")
-    else:
-        budget_str = f"{min_budget:,.0f} à {max_budget:,.0f} {currency_id}".replace(",", " ")
-
-    price_range_str = f"{min_price:.2f} à {max_price:.2f} {currency_id}" if min_price else f"<= {max_price:.2f} {currency_id}"
-    subject = f"🔥 Alerte P2P : {first_price:.2f} {currency_id} sur {first_platform} (Budget {budget_str})"
-
-    rows_html = ""
-    rows_text = ""
-
-    for item in matched_items:
-        plat = item.get("platform", "P2P")
-        nick = item.get("nickName", "Inconnu")
-        price = float(item.get("price", 0))
-        min_amt = float(item.get("minAmount", 0))
-        max_amt = float(item.get("maxAmount", 0))
-        qty = item.get("quantity", 0)
-        orders = item.get("recentOrderNum", 0)
-        rate = item.get("recentExecuteRate", 0)
-        url = item.get("url", "https://p2p.binance.com")
-
-        if min_budget == max_budget:
-            crypto_detail = f"~{min_budget / price:.2f} {token_id}"
-        else:
-            crypto_detail = f"~{min_budget / price:.2f} à ~{max_budget / price:.2f} {token_id}"
-
-        lim_str = f"{min_amt:,.0f} - {max_amt:,.0f} {currency_id}".replace(",", " ")
-
-        rows_text += (
-            f"\n- [{plat}] {nick}\n"
-            f"  Prix: {price:.2f} {currency_id} / {token_id}\n"
-            f"  Pour votre budget ({budget_str}): {crypto_detail}\n"
-            f"  Limites vendeur: {lim_str}\n"
-            f"  Ordres récents: {orders} (Taux: {rate}%)\n"
-            f"  Lien: {url}\n"
-        )
-
-        rows_html += f"""
-        <tr style="border-bottom: 1px solid #e0e0e0;">
-            <td style="padding: 12px; font-weight: bold; color: #f59e0b;">{plat}</td>
-            <td style="padding: 12px; font-weight: bold; color: #1e293b;">{nick}</td>
-            <td style="padding: 12px; color: #16a34a; font-weight: bold; font-size: 16px;">{price:.2f} {currency_id}</td>
-            <td style="padding: 12px; font-weight: bold; color: #0284c7;">{crypto_detail}</td>
-            <td style="padding: 12px; color: #64748b;">{lim_str}</td>
-            <td style="padding: 12px; color: #64748b;">{orders} ({rate}%)</td>
-            <td style="padding: 12px;"><a href="{url}" style="color:#0284c7; font-weight:bold; text-decoration:none;">Ouvrir</a></td>
-        </tr>
-        """
-
-    text_body = f"""Bonjour,
-
-Une ou plusieurs offres correspondent à vos critères sur les marchés P2P !
-
-Critères configurés :
-- Prix recherché : {price_range_str}
-- Fourchette de budget : {budget_str} (limites vendeur compatibles)
-
-Offres trouvées :{rows_text}
-
-Bon achat !
-"""
-
-    html_body = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-</head>
-<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; padding: 20px; margin: 0;">
-    <div style="max-width: 780px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); overflow: hidden; border: 1px solid #e2e8f0;">
-        <div style="background: linear-gradient(135deg, #f59e0b, #d97706); padding: 24px; color: #ffffff; text-align: center;">
-            <h1 style="margin: 0; font-size: 24px;">🚀 Alerte P2P Multi-Plateformes Déclenchée</h1>
-            <p style="margin: 8px 0 0 0; opacity: 0.95; font-size: 15px;">
-                Meilleur prix sur <strong>{first_platform}</strong> : <strong>{first_price:.2f} {currency_id}</strong> | Budget : <strong>{budget_str}</strong>
-            </p>
-        </div>
-        <div style="padding: 24px;">
-            <p style="color: #334155; font-size: 15px; margin-top: 0;">
-                De nouvelles offres correspondent à vos critères (prix + limites compatibles avec votre budget de {budget_str}) :
-            </p>
-            <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; text-align: left;">
-                <thead>
-                    <tr style="background-color: #f1f5f9; color: #475569;">
-                        <th style="padding: 10px 12px;">Plateforme</th>
-                        <th style="padding: 10px 12px;">Vendeur</th>
-                        <th style="padding: 10px 12px;">Prix / {token_id}</th>
-                        <th style="padding: 10px 12px;">Reçu estimé</th>
-                        <th style="padding: 10px 12px;">Limites vendeur</th>
-                        <th style="padding: 10px 12px;">Taux</th>
-                        <th style="padding: 10px 12px;">Lien</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows_html}
-                </tbody>
-            </table>
-            <div style="text-align: center; margin: 30px 0 10px 0;">
-                <a href="{first_item.get('url', 'https://p2p.binance.com')}" target="_blank"
-                   style="background-color: #0284c7; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 8px; font-weight: bold; display: inline-block;">
-                   Ouvrir l'offre sur {first_platform}
-                </a>
-            </div>
-        </div>
-        <div style="background-color: #f8fafc; padding: 14px; text-align: center; font-size: 12px; color: #94a3b8; border-top: 1px solid #e2e8f0;">
-            Alerte automatique multi-plateformes générée à {datetime.now().strftime('%H:%M:%S')}
-        </div>
-    </div>
-</body>
-</html>
-"""
-    return subject, html_body, text_body
 
 
 def test_telegram(config):
@@ -824,26 +648,6 @@ def test_discord(config):
     return ok
 
 
-def test_email(config):
-    """Send a test email to verify credentials."""
-    print("[TEST EMAIL] Envoi d'un email de test...")
-    sub = "🧪 Test de notification - P2P Multi-Exchange Alert"
-    text = "Ceci est un email de test pour confirmer que vos paramètres SMTP fonctionnent correctement."
-    html = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; padding: 20px;">
-        <h2 style="color: #0284c7;">Test Réussi !</h2>
-        <p>Vos paramètres d'envoi d'email pour le script P2P Alert fonctionnent parfaitement.</p>
-        <p><small>Horodatage : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small></p>
-    </body>
-    </html>
-    """
-    ok, msg = send_email(sub, html, text, config)
-    if ok:
-        print("[TEST EMAIL] ✅ Email de test envoyé avec succès ! Vos identifiants sont valides.")
-    else:
-        print(f"[TEST EMAIL] ❌ Échec de l'envoi : {msg}")
-    return ok
 
 
 def run_check(config, alerted_ads):
@@ -1035,15 +839,7 @@ def run_check(config, alerted_ads):
             ok, msg = send_discord(dc_text, config)
             notifications_sent.append({"channel": "Discord", "success": ok, "detail": msg, "time": now_str})
 
-        # 3. Email Alert
-        em_cfg = config.get("email", {})
-        if em_cfg.get("enabled", True) and em_cfg.get("sender_email") and em_cfg.get("sender_password"):
-            sub, html, text = build_alert_message(matched, min_price, max_price, min_budget, max_budget, token_id, currency_id)
-            ok, msg = send_email(sub, html, text, config)
-            notifications_sent.append({"channel": "Email", "success": ok, "detail": msg, "time": now_str})
-
     tg_active = bool(config.get("telegram", {}).get("enabled", True) and config.get("telegram", {}).get("bot_token") and config.get("telegram", {}).get("chat_id"))
-    email_active = bool(config.get("email", {}).get("enabled", True) and config.get("email", {}).get("sender_email"))
 
     return {
         "time": now_str,
@@ -1059,15 +855,13 @@ def run_check(config, alerted_ads):
         "platform_best": platform_best,
         "notifications_sent": notifications_sent,
         "telegram_active": tg_active,
-        "email_active": email_active,
         "ineligible_count": len(ineligible_items),
         "eligible_filter_active": bool(config.get("buyer_profile", {}).get("filter_eligible_only", True))
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Moniteur de prix P2P Multi-Plateformes (Bybit, Binance, OKX, KuCoin) avec alertes Telegram & Email.")
-    parser.add_argument("--test-email", action="store_true", help="Envoyer un email de test pour valider la configuration SMTP.")
+    parser = argparse.ArgumentParser(description="Moniteur de prix P2P Multi-Plateformes (Bybit, Binance, OKX, KuCoin) avec alertes Telegram.")
     parser.add_argument("--test-telegram", action="store_true", help="Envoyer un message de test sur Telegram.")
     parser.add_argument("--test-discord", action="store_true", help="Envoyer un message de test sur Discord.")
     parser.add_argument("--test-all", action="store_true", help="Tester tous les canaux de notifications configurés.")
@@ -1080,9 +874,7 @@ def main():
         test_telegram(config)
     if args.test_discord or args.test_all:
         test_discord(config)
-    if args.test_email or args.test_all:
-        test_email(config)
-    if args.test_telegram or args.test_discord or args.test_email or args.test_all:
+    if args.test_telegram or args.test_discord or args.test_all:
         return
 
     min_p = config.get("target_min_price")
@@ -1093,7 +885,6 @@ def main():
     active_plats = [p.capitalize() for p in get_configured_platforms(config)]
 
     tg_ready = bool(config.get("telegram", {}).get("enabled", True) and config.get("telegram", {}).get("bot_token") and config.get("telegram", {}).get("chat_id"))
-    em_ready = bool(config.get("email", {}).get("enabled", False) and config.get("email", {}).get("sender_email") and config.get("email", {}).get("sender_password"))
 
     buyer_cfg = config.get("buyer_profile", {})
     filt_on = buyer_cfg.get("filter_eligible_only", True)
@@ -1116,7 +907,7 @@ def main():
     print(f"• Filtre éligibilité vendeur : {'✅ Actif (exclut vendeurs exigeant > ' + str(ord_lim) + ' ordres)' if filt_on else '❌ Désactivé'}")
     print(f"• Intervalle de test : {config.get('check_interval_seconds', 30)} secondes")
     print(f"• Canal Telegram : {'✅ Configuré (Recommandé Cloud)' if tg_ready else '⚠️ Non configuré'}")
-    print(f"• Canal Email : {'✅ Configuré' if em_ready else '⚪ Désactivé'}")
+
     print("=" * 65)
 
     alerted_ads = {}

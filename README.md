@@ -1,6 +1,6 @@
 # 🔔 P2P Multi-Exchange Price Alert Notifier (Bybit, Binance, OKX, KuCoin)
 
-Surveillance automatique en temps réel des meilleurs marchés **P2P en Algérie** (**Bybit**, **Binance P2P**, **OKX**, **KuCoin** pour **USDT / DZD**) avec comparateur instantané et notifications par **Telegram** (push mobile avec alerte sonore), **Email** ou **Discord**.
+Surveillance automatique en temps réel des meilleurs marchés **P2P en Algérie** (**Bybit**, **Binance P2P**, **OKX**, **KuCoin** pour **USDT / DZD**) avec comparateur instantané et notifications par **Telegram** (push mobile avec alerte sonore) ou **Discord**.
 
 Le projet inclut un **serveur web cloud avec tableau de bord en direct** (`app_cloud.py`) affichant la comparaison des prix entre chaque plateforme, prêt à être déployé gratuitement 24h/24 et 7j/7 sur **Render**, sans jamais s'interrompre grâce à un système keep-alive **UptimeRobot**.
 
@@ -13,23 +13,22 @@ Le projet inclut un **serveur web cloud avec tableau de bord en direct** (`app_c
 4. [☁️ 2. Déploiement Cloud 24/7 sur Render](#-2-déploiement-cloud-247-sur-render-gratuit)
 5. [⏱️ 3. Empêcher Render de Dormir (Keep-Alive 24/7 avec UptimeRobot)](#-3-empêcher-render-de-dormir-keep-alive-247-avec-uptimerobot)
 6. [⚙️ 4. Paramètres de Configuration (`config.json`)](#-4-paramètres-de-configuration-configjson)
-7. [📧 5. Configuration Email (Optionnel - Gmail)](#-5-configuration-email-optionnel---gmail)
-8. [💻 6. Utilisation Locale (Windows / Mac / Linux)](#-6-utilisation-locale-windows--mac--linux)
-9. [🛡️ 7. Filtre d'Éligibilité Acheteur](#-7-filtre-déligibilité-acheteur)
-10. [❓ 8. FAQ & Dépannage](#-8-faq--dépannage)
+7. [💻 5. Utilisation Locale (Windows / Mac / Linux)](#-5-utilisation-locale-windows--mac--linux)
+8. [🛡️ 6. Filtre d'Éligibilité Acheteur](#-6-filtre-déligibilité-acheteur)
+9. [❓ 7. FAQ & Dépannage](#-7-faq--dépannage)
 
 ---
 
 ## ⚡ Fonctionnalités Clés
 
 - **Agrégateur Multi-Plateformes** : Interroge en parallèle **Binance P2P**, **Bybit**, **OKX** et **KuCoin** pour trouver automatiquement la plateforme la moins chère.
-- **Sélection Simple & Flexible** : Choisissez une seule plateforme (`"binance"` ou `"bybit"` ou `"okx"`) ou comparez-les toutes à la fois (`"all"`).
-- **Notifications Multi-Canaux** : Alerte instantanée sur smartphone via **Telegram Bot**, webhook **Discord** ou **Email HTML** avec badge de la plateforme gagnante.
+- **Sélection Simple & Flexible** : Choisissez une seule plateforme (`"binance"` ou `"bybit"`) ou comparez-les toutes à la fois (`"all"`).
+- **Notifications Instantanées** : Alerte sur smartphone via **Telegram Bot** (avec alerte sonore et lien direct) ou webhook **Discord**.
 - **Filtre Intelligent du Budget** : Vérifie que le vendeur accepte bien votre montant d'achat (ex: entre 2 000 DA et 13 000 DA) en analysant ses limites minimales et maximales.
 - **Filtre d'Éligibilité Acheteur** : Écarte automatiquement les marchands qui imposent des conditions bloquantes pour les petits acheteurs (ex: marchands exigeant plus de 5, 10 ou 60 ordres sur 30 jours).
 - **Tableau de Bord Web en Direct (`app_cloud.py`)** : Interface sombre moderne avec comparateur en temps réel des prix Bybit / Binance / OKX / KuCoin et historique des alertes.
 - **Anti-Spam (Cooldown)** : Évite de vous submerger de notifications pour la même offre (intervalle configurable, ex: 15 minutes).
-- **Zéro Dépendance Lourde** : Fonctionne avec la bibliothèque standard Python (`urllib`, `smtplib`, `json`, `http.server`, `concurrent.futures`).
+- **Zéro Dépendance Lourde** : Fonctionne avec la bibliothèque standard Python (`urllib`, `json`, `http.server`, `concurrent.futures`).
 
 ---
 
@@ -237,23 +236,15 @@ Puis ouvrez [`config.json`](config.json) pour personnaliser vos critères d'acha
   "discord": {
     "enabled": false,
     "webhook_url": ""
-  },
-  "email": {
-    "enabled": false,
-    "smtp_server": "smtp.gmail.com",
-    "smtp_port": 587,
-    "use_tls": true,
-    "sender_email": "votre_email@gmail.com",
-    "sender_password": "votre_mot_de_passe_application",
-    "receiver_email": "votre_email@gmail.com"
   }
 }
 ```
 
 ### Détail des options :
 
+- `platforms` : Liste des plateformes à scruter (ex: `["binance", "bybit"]` ou `"all"`).
 - `target_min_price` : Prix unitaire minimum pour déclencher l'alerte (ex: `200.0` DZD).
-- `target_max_price` : Prix unitaire maximum acceptable (ex: `255.0` DZD). L'alerte sonne si une offre se trouve entre ces deux prix.
+- `target_max_price` : Prix unitaire maximum acceptable (ex: `256.0` DZD). L'alerte sonne si une offre se trouve entre ces deux prix.
 - `min_amount_dzd` : Montant minimum de votre budget d'achat en Dinars (ex: `2000.0` DA).
 - `max_amount_dzd` : Montant maximum de votre budget d'achat en Dinars (ex: `13000.0` DA).
 - `check_interval_seconds` : Intervalle de vérification des prix en secondes (ex: `30` secondes).
@@ -261,32 +252,15 @@ Puis ouvrez [`config.json`](config.json) pour personnaliser vos critères d'acha
 
 ---
 
-## 📧 5. Configuration Email (Optionnel - Gmail)
-
-Si vous souhaitez également recevoir des emails en local :
-
-1. Rendez-vous sur votre compte Google : [Sécurité Google](https://myaccount.google.com/security).
-2. Activez la **Validation en deux étapes** (2-Step Verification) si ce n'est pas déjà fait.
-3. Allez sur [Mots de passe des applications](https://myaccount.google.com/apppasswords).
-4. Saisissez un nom d'application (ex: `Bybit Alert`) et cliquez sur **Créer**.
-5. Google affiche un code secret à 16 lettres (ex: `abcd efgh ijkl mnop`).
-6. Copiez ce code sans espaces dans le champ `sender_password` de `config.json`.
-7. Passez `"enabled": true` dans la section `"email"`.
-
-> [!NOTE]
-> Sur les hébergeurs Cloud gratuits (Render Free, etc.), les ports d'envoi d'emails sortants SMTP (ports 587 et 465) sont systématiquement bloqués pour éviter le spam. Privilégiez toujours **Telegram** dans le Cloud.
-
----
-
-## 💻 6. Utilisation Locale (Windows / Mac / Linux)
+## 💻 5. Utilisation Locale (Windows / Mac / Linux)
 
 ### A. Tester vos canaux de notification
 ```bash
 # Tester Telegram
 python bybit_p2p_notifier.py --test-telegram
 
-# Tester Email
-python bybit_p2p_notifier.py --test-email
+# Tester Discord
+python bybit_p2p_notifier.py --test-discord
 
 # Tester tous les canaux activés
 python bybit_p2p_notifier.py --test-all
@@ -311,7 +285,7 @@ Puis ouvrez votre navigateur sur [http://localhost:8080](http://localhost:8080).
 
 ---
 
-## 🛡️ 7. Filtre d'Éligibilité Acheteur
+## 🛡️ 6. Filtre d'Éligibilité Acheteur
 
 Sur Bybit P2P, certains marchands imposent des critères stricts aux acheteurs (exigences de 5, 10 ou 60 ordres réussis sur les 30 derniers jours, compte vérifié KYC, ancienneté du compte, nationalité).
 
@@ -326,7 +300,7 @@ Le script analyse le champ `tradingPreferenceSet` de chaque annonce et compare l
 
 ---
 
-## ❓ 8. FAQ & Dépannage
+## ❓ 7. FAQ & Dépannage
 
 ### 1. Le bot Telegram ne m'envoie aucun message
 - Avez-vous cliqué sur **Démarrer** (`/start`) dans la discussion privée avec votre bot ? C'est la cause numéro 1 d'échec de Telegram.
