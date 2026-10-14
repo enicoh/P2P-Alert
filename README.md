@@ -200,7 +200,16 @@ Si vous préférez une alternative à UptimeRobot :
 
 ## ⚙️ 4. Paramètres de Configuration (`config.json`)
 
-Le fichier [`config.json`](config.json) permet de définir vos critères d'achat et vos alertes :
+Copiez le modèle sécurisé `config.example.json` vers `config.json` :
+```bash
+# Sur Windows (Invite de commandes / PowerShell)
+copy config.example.json config.json
+
+# Sur Linux / Mac
+cp config.example.json config.json
+```
+
+Puis ouvrez [`config.json`](config.json) pour personnaliser vos critères d'achat et vos alertes :
 
 ```json
 {

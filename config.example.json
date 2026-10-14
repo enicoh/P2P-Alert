@@ -17,8 +17,8 @@
   },
   "telegram": {
     "enabled": true,
-    "bot_token": "8806002756:AAF6QFZMKXlMjXxt4e_2VNLRo_jtFlMRk_A",
-    "chat_id": "5850428919"
+    "bot_token": "VOTRE_BOT_TOKEN_TELEGRAM",
+    "chat_id": "VOTRE_CHAT_ID_TELEGRAM"
   },
   "discord": {
     "enabled": false,
@@ -29,8 +29,8 @@
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587,
     "use_tls": true,
-    "sender_email": "hocineshow9@gmail.com",
-    "sender_password": "begu cozw lhii puyx",
-    "receiver_email": "hocineshow9@gmail.com"
+    "sender_email": "votre_email@gmail.com",
+    "sender_password": "votre_mot_de_passe_application",
+    "receiver_email": "votre_email@gmail.com"
   }
 }

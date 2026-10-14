@@ -69,7 +69,14 @@ def load_config():
         except Exception as e:
             print(f"[ATTENTION] Impossible de lire '{CONFIG_FILE}': {e}")
     else:
-        print(f"[INFO] '{CONFIG_FILE}' introuvable, utilisation des variables d'environnement.")
+        example_path = CONFIG_FILE.parent / "config.example.json"
+        if example_path.exists():
+            try:
+                with open(example_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except Exception:
+                pass
+        print(f"[INFO] '{CONFIG_FILE}' introuvable, utilisation de 'config.example.json' ou des variables d'environnement.")
 
     # Platforms configuration
     if os.environ.get("PLATFORMS"):
